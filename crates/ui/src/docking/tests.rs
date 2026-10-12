@@ -1292,3 +1292,20 @@ fn insertion_marker_handles_subpixel_strip_crossing_zero_without_panicking() {
     assert!(proposal.noop);
     assert!(rect.contains_rect(proposal.insertion.unwrap()));
 }
+
+#[test]
+fn floating_border_movement_does_not_accumulate_fractional_step_rounding() {
+    let ctx = Context::default();
+    let mut layout = sample();
+    for _ in 0..2 {
+        step(&ctx, &mut layout, vec![]);
+    }
+    let from = ctx.read_response(Id::new("test-area").with(("move-group-border", Some(&5u32)))).unwrap().rect.center();
+    let original = layout.floating[0].rect;
+    step(&ctx, &mut layout, vec![Event::PointerMoved(from), pointer_button(from, true)]);
+    for index in 1..=8 {
+        step(&ctx, &mut layout, vec![Event::PointerMoved(from + vec2(80.0, 60.0) * (index as f32 / 8.0))]);
+    }
+    assert!((layout.floating[0].rect[0] - original[0] - 80.0).abs() <= 1.0);
+    assert!((layout.floating[0].rect[1] - original[1] - 60.0).abs() <= 1.0);
+}

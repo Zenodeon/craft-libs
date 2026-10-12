@@ -117,6 +117,7 @@ struct Drag<P> {
 
 #[derive(Clone)]
 struct GroupDrag<P> {
+    origin: Pos2,
     panel: P,
     original: [f32; 4],
 }
@@ -546,19 +547,24 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             && response.drag_started()
             && let Some(first) = panels.first()
         {
+            let origin = ui.input(|input| input.pointer.press_origin()).unwrap_or(hit.center());
             ui.ctx().data_mut(|d| {
                 d.insert_temp(
                     self.id.with("group-drag"),
-                    GroupDrag { panel: first.clone(), original: [rect.left(), rect.top(), rect.width(), rect.height()] },
+                    GroupDrag { panel: first.clone(), original: [rect.left(), rect.top(), rect.width(), rect.height()], origin },
                 )
             });
         }
         if panels.iter().all(|p| (self.permissions)(p).movable)
             && response.dragged()
-            && ui.ctx().data(|d| d.get_temp::<GroupDrag<P>>(self.id.with("group-drag"))).is_some()
+            && let Some(drag) = ui.ctx().data(|d| d.get_temp::<GroupDrag<P>>(self.id.with("group-drag")))
+            && let Some(pointer) = ui.input(|input| input.pointer.interact_pos())
             && !ui.input(|i| i.key_pressed(Key::Escape) || !i.focused)
         {
-            let moved = clamp_float(rect.translate(ui.input(|i| i.pointer.delta())), ui.ctx().content_rect());
+            let [x, y, width, height] = drag.original;
+            // Resolve from the original press, avoiding cumulative pixel rounding as the
+            // Area follows fractional pointer steps.
+            let moved = clamp_float(Rect::from_min_size(pos2(x, y), vec2(width, height)).translate(pointer - drag.origin), ui.ctx().content_rect());
             if let Some(first) = panels.first() {
                 self.output
                     .actions
