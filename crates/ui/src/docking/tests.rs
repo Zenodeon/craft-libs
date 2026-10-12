@@ -1334,3 +1334,62 @@ fn overflowing_strip_paints_a_single_ellipsis_symbol() {
     h.run_steps(2);
     assert!(h.output().shapes.iter().any(|shape| paints(&shape.shape, "\u{2026}")));
 }
+
+#[test]
+fn live_drag_renders_body_once_disabled_with_independent_float_size() {
+    struct Content {
+        bodies: Vec<bool>,
+        rect: Option<Rect>,
+    }
+    impl DockContent<u32> for Content {
+        fn live_drag(&self) -> bool {
+            true
+        }
+        fn floating_size(&self, _: &u32) -> Option<egui::Vec2> {
+            Some(vec2(300.0, 400.0))
+        }
+        fn body(&mut self, ui: &mut egui::Ui, _: &u32) {
+            self.bodies.push(ui.is_enabled());
+        }
+        fn resolve_drag(&mut self, _: &Context, _: &DockStyle, request: &DropRequest<'_, u32>) -> Option<DropFeedback> {
+            self.rect = request.floating_rect;
+            Some(DropFeedback::default())
+        }
+    }
+    let ctx = Context::default();
+    let area = Id::new("live-test");
+    let layout = Layout { root: Some(Node::Tabs { panels: vec![1u32], active: 0 }), floating: Vec::new() };
+    let before = layout.clone();
+    let mut content = Content { bodies: Vec::new(), rect: None };
+    for step in 0..3 {
+        content.bodies.clear();
+        let events = if step == 0 {
+            vec![
+                Event::PointerMoved(pos2(30.0, 20.0)),
+                Event::PointerButton { pos: pos2(30.0, 20.0), button: PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+            ]
+        } else {
+            vec![Event::PointerMoved(pos2(700.0, 500.0))]
+        };
+        ctx.run_ui(RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0))), events, ..Default::default() }, |ui| {
+            if step == 0 {
+                assert!(begin_drag(&ctx, area, 1u32, Rect::from_min_size(Pos2::ZERO, vec2(950.0, 700.0))));
+            }
+            let output = DockArea::new(area).show_customized(
+                ui,
+                &layout,
+                &DockStyle::from_ui(ui),
+                |p| p.to_string(),
+                |_| Permissions::default(),
+                |_| PanelLimits::default(),
+                &mut content,
+            );
+            assert!(output.actions.is_empty());
+        })
+        .textures_delta
+        .clear();
+        assert_eq!(content.bodies, [false], "source body must be blank and moving body must be disabled");
+        assert_eq!(layout, before);
+    }
+    cancel_drag::<u32>(&ctx, area);
+}

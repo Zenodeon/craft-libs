@@ -188,6 +188,22 @@ pub trait DockContent<P> {
         logical.into()
     }
     /// Full rendered group bounds, including its tab header.
+    /// Opt into transient UI dragging without moving the saved source layout.
+    fn live_drag(&self) -> bool {
+        false
+    }
+    fn drag_members(&self, _ctx: &Context, _panel: &P) -> Option<Vec<P>> {
+        None
+    }
+    fn render_drag_ui(&self) -> bool {
+        true
+    }
+    /// Preferred floating size, independent of the current dock geometry.
+    fn floating_size(&self, _panel: &P) -> Option<Vec2> {
+        None
+    }
+    /// Publish measured targets for hosts coordinating multiple docking surfaces.
+    fn drop_targets(&mut self, _ctx: &Context, _targets: &[DropTarget<P>]) {}
     fn group_rect(&mut self, _ctx: &Context, _panels: &[P], _rect: Rect) {}
     fn panel_menu(&mut self, _ui: &mut Ui, _panel: &P) {}
     fn group_header_width(&self, _panels: &[P], _active: &P, _floating: bool) -> f32 {
@@ -207,13 +223,20 @@ impl<P, F: FnMut(&mut Ui, &P)> DockContent<P> for BodyContent<F> {
 /// chrome can instead use the model, target resolver and resize/tab primitives independently.
 pub struct DockArea<P = ()> {
     id: Id,
+    surface: Id,
     activation: Option<P>,
     blockers: Vec<Rect>,
 }
 
 impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<P> {
     pub fn new(id: Id) -> Self {
-        Self { id, activation: None, blockers: Vec::new() }
+        Self { id, surface: id, activation: None, blockers: Vec::new() }
+    }
+
+    /// Independent divider identity for multiple surfaces sharing a drag session.
+    pub fn surface(mut self, id: Id) -> Self {
+        self.surface = id;
+        self
     }
 
     /// Whether keyboard focus belongs to a rendered docking control in this layout.
@@ -338,6 +361,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<P> {
         }
         let mut renderer = Renderer {
             id: self.id,
+            surface: self.surface,
             style,
             label: &label,
             permissions: &permissions,
@@ -356,6 +380,8 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<P> {
             ui.allocate_rect(rect, Sense::hover());
         }
         renderer.floating(ui.ctx());
+        renderer.content.drop_targets(ui.ctx(), &renderer.targets);
+        renderer.drag_ui(ui.ctx());
         renderer.finish_group_drag(ui.ctx());
         renderer.finish_drag(ui.ctx());
         ui.ctx().data_mut(|d| d.insert_temp(self.id.with("owned-interactions"), renderer.owned_interactions));
@@ -366,6 +392,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<P> {
 struct Renderer<'a, P> {
     workspace: Rect,
     id: Id,
+    surface: Id,
     style: &'a DockStyle,
     label: &'a dyn Fn(&P) -> String,
     permissions: &'a dyn Fn(&P) -> Permissions,
@@ -416,7 +443,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 // The divider's inner-edge hit margin must win over child scrollbars, just
                 // as accordion dividers win over the adjacent panel's content.
                 let response = ResizeHandle::new(
-                    self.id.with(("split", &*path)),
+                    self.surface.with(("split", &*path)),
                     *axis,
                     split.divider,
                     &self.style.resize_label,
@@ -527,6 +554,17 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             return;
         }
         ui.painter().rect_filled(rect, 0.0, self.style.background);
+        let moving =
+            self.content.live_drag()
+                && (ui.ctx().data(|d| d.get_temp::<Drag<P>>(self.id.with("drag"))).is_some_and(|drag| {
+                    self.content.drag_members(ui.ctx(), &drag.panel).unwrap_or_else(|| vec![drag.panel.clone()]).contains(panel)
+                }) || ui
+                    .ctx()
+                    .data(|d| d.get_temp::<GroupDrag<P>>(self.id.with("group-drag")))
+                    .is_some_and(|drag| self.layout.floating.iter().any(|g| g.panels.contains(&drag.panel) && g.panels.contains(panel))));
+        if moving {
+            return;
+        }
         let mut child =
             ui.new_child(UiBuilder::new().id(self.id.with(("body", panel))).max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)));
         child.set_clip_rect(rect.intersect(ui.clip_rect()));
@@ -540,7 +578,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         if !super::targets::usable(hit) {
             return;
         }
-        let response = ui.interact(hit, id, Sense::drag()).on_hover_cursor(egui::CursorIcon::Grab);
+        let response = ui.interact(hit, id, Sense::drag());
         self.register_interaction(ui.ctx(), response.id);
         response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &self.style.move_label));
         if panels.iter().all(|p| (self.permissions)(p).movable)
@@ -565,7 +603,9 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             // Resolve from the original press, avoiding cumulative pixel rounding as the
             // Area follows fractional pointer steps.
             let moved = clamp_float(Rect::from_min_size(pos2(x, y), vec2(width, height)).translate(pointer - drag.origin), ui.ctx().content_rect());
-            if let Some(first) = panels.first() {
+            if !self.content.live_drag()
+                && let Some(first) = panels.first()
+            {
                 self.output
                     .actions
                     .push(Action::MoveFloating { panel: first.clone(), rect: [moved.left(), moved.top(), moved.width(), moved.height()] });
@@ -576,6 +616,16 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
     fn group(&mut self, ui: &mut Ui, panels: &[P], active: usize, rect: Rect, floating: bool) {
         let Some(selected) = panels.get(active) else { return };
         self.content.group_rect(ui.ctx(), panels, rect);
+        let tab_drag = ui.ctx().data(|d| d.get_temp::<Drag<P>>(self.id.with("drag")));
+        let group_drag = ui.ctx().data(|d| d.get_temp::<GroupDrag<P>>(self.id.with("group-drag")));
+        let whole = self.content.live_drag()
+            && (group_drag.is_some_and(|d| panels.contains(&d.panel))
+                || tab_drag.is_some_and(|d| panels.contains(&d.panel) && self.content.drag_members(ui.ctx(), &d.panel).is_some_and(|m| m.len() > 1)));
+        if whole {
+            ui.painter().rect_filled(rect, 0.0, self.style.background);
+            return;
+        }
+
         let policy = (self.permissions)(selected);
         let bare = panels.len() == 1 && policy == Permissions::PROTECTED;
         if bare {
@@ -874,6 +924,69 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         }
     }
 
+    fn drag_ui(&mut self, ctx: &Context) {
+        if !self.content.live_drag()
+            || !self.content.render_drag_ui()
+            || ctx.input(|i| !i.focused || i.key_pressed(Key::Escape) || !i.pointer.primary_down())
+        {
+            return;
+        }
+        let Some(pointer) = ctx.pointer_interact_pos() else {
+            return;
+        };
+        let tab = ctx.data(|d| d.get_temp::<Drag<P>>(self.id.with("drag")));
+        let group = ctx.data(|d| d.get_temp::<GroupDrag<P>>(self.id.with("group-drag")));
+        let (panels, selected, rect) = if let Some(drag) = tab {
+            let size = self.content.floating_size(&drag.panel).unwrap_or(drag.source.size());
+            let grab = drag.grab.min(vec2(size.x, self.style.tab_height));
+            (
+                self.content.drag_members(ctx, &drag.panel).unwrap_or_else(|| vec![drag.panel.clone()]),
+                drag.panel,
+                clamp_float(Rect::from_min_size(pointer - grab, size), ctx.content_rect()),
+            )
+        } else if let Some(drag) = group {
+            let Some(g) = self.layout.floating.iter().find(|g| g.panels.contains(&drag.panel)) else {
+                return;
+            };
+            let [x, y, w, h] = drag.original;
+            (
+                g.panels.clone(),
+                g.panels.get(g.active).unwrap_or(&drag.panel).clone(),
+                clamp_float(Rect::from_min_size(pos2(x, y), vec2(w, h)).translate(pointer - drag.origin), ctx.content_rect()),
+            )
+        } else {
+            return;
+        };
+        egui::Area::new(self.id.with("drag-ui")).order(egui::Order::Foreground).fixed_pos(rect.min).movable(false).interactable(false).show(
+            ctx,
+            |ui| {
+                ui.set_min_size(rect.size());
+                ui.disable();
+                ui.set_clip_rect(rect);
+                ui.painter().rect_filled(rect, 0.0, self.style.background);
+                let header = Rect::from_min_size(rect.min, vec2(rect.width(), self.style.tab_height.min(rect.height())));
+                ui.painter().rect_filled(header, 0.0, self.style.tab_background);
+                let mut x = header.left();
+                for panel in panels {
+                    let text = (self.label)(&panel);
+                    let galley = ui.painter().layout_no_wrap(text, self.style.font.clone(), self.style.text);
+                    let width = (galley.size().x + 20.0).min((header.right() - x).max(0.0));
+                    let tab = Rect::from_min_size(pos2(x, header.top()), vec2(width, header.height()));
+                    if panel == selected {
+                        ui.painter().rect_filled(tab, 0.0, self.style.active_background);
+                    }
+                    ui.painter().with_clip_rect(tab).galley(pos2(x + 10.0, header.center().y - galley.size().y / 2.0), galley, self.style.text);
+                    x += width;
+                }
+                let body = Rect::from_min_max(pos2(rect.left(), header.bottom()), rect.max);
+                let mut child = ui.new_child(UiBuilder::new().id(self.id.with(("body", &selected))).max_rect(body));
+                child.set_clip_rect(body);
+                self.content.body(&mut child, &selected);
+                ui.painter().rect_stroke(rect, 0.0, self.style.border, StrokeKind::Inside);
+            },
+        );
+    }
+
     fn host_drop(&mut self, ctx: &Context, panel: &P, pointer: Pos2, whole_group: bool, released: bool, floating_rect: Option<Rect>) -> bool {
         let request = DropRequest {
             panel,
@@ -901,7 +1014,9 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
     fn finish_group_drag(&mut self, ctx: &Context) {
         let Some(drag) = ctx.data(|d| d.get_temp::<GroupDrag<P>>(self.id.with("group-drag"))) else { return };
         if !self.layout.floating.iter().any(|g| g.panels.contains(&drag.panel) && g.panels.iter().all(|p| (self.permissions)(p).movable)) {
-            ctx.data_mut(|d| d.remove::<GroupDrag<P>>(self.id.with("group-drag")));
+            if !self.content.live_drag() {
+                ctx.data_mut(|d| d.remove::<GroupDrag<P>>(self.id.with("group-drag")));
+            }
             return;
         }
         let (escape, focused, down, released, pointer) =
@@ -911,7 +1026,17 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             && (down || released)
             && let Some(pointer) = pointer.filter(|p| p.is_finite())
             && !self.blockers.iter().any(|r| r.contains(pointer))
-            && self.host_drop(ctx, &drag.panel, pointer, true, released, None)
+            && self.host_drop(
+                ctx,
+                &drag.panel,
+                pointer,
+                true,
+                released,
+                self.content.live_drag().then(|| {
+                    let [x, y, w, h] = drag.original;
+                    clamp_float(Rect::from_min_size(pos2(x, y), vec2(w, h)).translate(pointer - drag.origin), ctx.content_rect())
+                }),
+            )
         {
             if released {
                 ctx.data_mut(|d| d.remove::<GroupDrag<P>>(self.id.with("group-drag")));
@@ -933,12 +1058,18 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         }
     }
 
+    fn tab_float_rect(&self, ctx: &Context, drag: &Drag<P>, pointer: Pos2) -> Rect {
+        let size = self.content.floating_size(&drag.panel).filter(|s| s.is_finite() && s.x > 0.0 && s.y > 0.0).unwrap_or(drag.source.size());
+        let grab = drag.grab.min(vec2(size.x, self.style.tab_height));
+        clamp_float(Rect::from_min_size(pointer - grab, size), ctx.content_rect())
+    }
+
     fn finish_drag(&mut self, ctx: &Context) {
         let Some(drag) = ctx.data(|d| d.get_temp::<Drag<P>>(self.id.with("drag"))) else { return };
         let (pointer, down, released, focused) =
             ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_down(), i.pointer.primary_released(), i.focused));
         let escape = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape));
-        if escape || !focused || !self.layout.contains(&drag.panel) || (!down && !released) {
+        if escape || !focused || (!self.content.live_drag() && !self.layout.contains(&drag.panel)) || (!down && !released) {
             cancel_drag::<P>(ctx, self.id);
             return;
         }
@@ -956,7 +1087,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         }
         let floating_rect = ((self.permissions)(&drag.panel).floatable
             && (!drag.source.contains(pointer) || self.layout.floating.iter().any(|g| g.panels.contains(&drag.panel))))
-        .then(|| clamp_float(Rect::from_min_size(pointer - drag.grab, drag.source.size()), ctx.content_rect()));
+        .then(|| self.tab_float_rect(ctx, &drag, pointer));
         if self.host_drop(ctx, &drag.panel, pointer, false, released, floating_rect) {
             if released {
                 cancel_drag::<P>(ctx, self.id);
@@ -980,7 +1111,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             } else if (self.permissions)(&drag.panel).floatable
                 && (!drag.source.contains(pointer) || self.layout.floating.iter().any(|g| g.panels.contains(&drag.panel)))
             {
-                let rect = clamp_float(Rect::from_min_size(pointer - drag.grab, drag.source.size()), ctx.content_rect());
+                let rect = self.tab_float_rect(ctx, &drag, pointer);
                 Some(Action::Float { panel: drag.panel.clone(), rect: [rect.left(), rect.top(), rect.width(), rect.height()] })
             } else {
                 None
@@ -1013,7 +1144,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 painter.rect_filled(marker, 0.0, self.style.accent);
             }
         } else if (self.permissions)(&drag.panel).floatable {
-            let rect = clamp_float(Rect::from_min_size(pointer - drag.grab, drag.source.size()), ctx.content_rect());
+            let rect = self.tab_float_rect(ctx, &drag, pointer);
             painter.rect_stroke(rect, 0.0, Stroke::new(2.0, self.style.accent), StrokeKind::Inside);
         }
     }
