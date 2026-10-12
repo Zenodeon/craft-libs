@@ -782,7 +782,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 if response.clicked() {
                     let size = self.content.floating_size(panel).filter(|s| s.is_finite() && s.x > 0.0 && s.y > 0.0).unwrap_or(group.size());
                     let rect = clamp_float(Rect::from_min_size(group.min + vec2(24.0, 24.0), size), ui.ctx().content_rect());
-                    self.output.actions.push(Action::Float { panel: panel.clone(), rect: [rect.left(), rect.top(), rect.width(), rect.height()] });
+                    self.output.actions.push(Action::Float { panel: panel.clone(), rect: [rect.left(), rect.top(), size.x, size.y] });
                     ui.close();
                 }
             }
@@ -972,9 +972,13 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         } else {
             return;
         };
-        egui::Area::new(self.id.with("drag-ui")).order(egui::Order::Foreground).fixed_pos(rect.min).movable(false).interactable(false).show(
-            ctx,
-            |ui| {
+        egui::Area::new(self.id.with("drag-ui"))
+            .fade_in(false)
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.min)
+            .movable(false)
+            .interactable(false)
+            .show(ctx, |ui| {
                 ui.set_min_size(rect.size());
                 ui.visuals_mut().disabled_alpha = 1.0;
                 ui.disable();
@@ -999,8 +1003,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 child.set_clip_rect(body);
                 self.content.body(&mut child, &selected);
                 ui.painter().rect_stroke(rect, 0.0, self.style.border, StrokeKind::Inside);
-            },
-        );
+            });
     }
 
     fn host_drop(&mut self, ctx: &Context, panel: &P, pointer: Pos2, whole_group: bool, released: bool, floating_rect: Option<Rect>) -> bool {
