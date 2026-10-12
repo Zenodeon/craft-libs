@@ -199,6 +199,11 @@ pub trait DockContent<P> {
     fn render_drag_ui(&self) -> bool {
         true
     }
+    /// Opacity of the transient moving UI only; destination feedback stays unaffected.
+    /// Non-finite values fall back to opaque and finite values are clamped to 0..=1.
+    fn drag_opacity(&self, _ctx: &Context, _request: &DropRequest<'_, P>) -> f32 {
+        1.0
+    }
     /// Preferred floating size, independent of the current dock geometry.
     fn floating_size(&self, _panel: &P) -> Option<Vec2> {
         None
@@ -951,13 +956,14 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         };
         let tab = ctx.data(|d| d.get_temp::<Drag<P>>(self.id.with("drag")));
         let group = ctx.data(|d| d.get_temp::<GroupDrag<P>>(self.id.with("group-drag")));
-        let (panels, selected, rect) = if let Some(drag) = tab {
+        let (panels, selected, rect, whole_group) = if let Some(drag) = tab {
             let size = self.content.floating_size(&drag.panel).unwrap_or(drag.source.size());
             let grab = drag.grab.min(vec2(size.x, self.style.tab_height));
             (
                 self.content.drag_members(ctx, &drag.panel).unwrap_or_else(|| vec![drag.panel.clone()]),
                 drag.panel,
                 clamp_float(Rect::from_min_size(pointer - grab, size), ctx.content_rect()),
+                false,
             )
         } else if let Some(drag) = group {
             let Some(g) = self.layout.floating.iter().find(|g| g.panels.contains(&drag.panel)) else {
@@ -968,10 +974,25 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 g.panels.clone(),
                 g.panels.get(g.active).unwrap_or(&drag.panel).clone(),
                 clamp_float(Rect::from_min_size(pos2(x, y), vec2(w, h)).translate(pointer - drag.origin), ctx.content_rect()),
+                true,
             )
         } else {
             return;
         };
+        let opacity = self.content.drag_opacity(
+            ctx,
+            &DropRequest {
+                panel: &selected,
+                pointer,
+                targets: &self.targets,
+                floating_rect: Some(rect),
+                whole_group,
+                released: false,
+                workspace: self.workspace,
+                screen: ctx.content_rect(),
+            },
+        );
+        let opacity = if opacity.is_finite() { opacity.clamp(0.0, 1.0) } else { 1.0 };
         egui::Area::new(self.id.with("drag-ui"))
             .fade_in(false)
             .order(egui::Order::Foreground)
@@ -982,6 +1003,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 ui.set_min_size(rect.size());
                 ui.visuals_mut().disabled_alpha = 1.0;
                 ui.disable();
+                ui.set_opacity(opacity);
                 ui.set_clip_rect(rect);
                 ui.painter().rect_filled(rect, 0.0, self.style.background);
                 let header = Rect::from_min_size(rect.min, vec2(rect.width(), self.style.tab_height.min(rect.height())));

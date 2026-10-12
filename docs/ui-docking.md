@@ -171,3 +171,8 @@ commit after every surface renders the source snapshot, avoiding duplicate widge
 different egui layers within a frame. Live floating movement is transient until host release;
 cancellation does not write clamped geometry back. The floating top-border move target keeps
 the default cursor, while grips and resize handles retain their usual feedback.
+
+`DockContent::drag_opacity` controls only the transient moving UI, using the same drag request
+and measured targets as destination resolution. It defaults to opaque; finite values clamp
+to 0..=1 and non-finite values fall back to opaque. Insertion and destination feedback retain
+their own opacity. The moving UI remains disabled at every opacity.

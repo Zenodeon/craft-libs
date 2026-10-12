@@ -1345,6 +1345,8 @@ fn live_drag_renders_body_once_disabled_with_independent_float_size() {
     struct Content {
         bodies: Vec<bool>,
         rect: Option<Rect>,
+        opacity: f32,
+        observed_opacity: Vec<f32>,
     }
     impl DockContent<u32> for Content {
         fn live_drag(&self) -> bool {
@@ -1355,6 +1357,10 @@ fn live_drag_renders_body_once_disabled_with_independent_float_size() {
         }
         fn body(&mut self, ui: &mut egui::Ui, _: &u32) {
             self.bodies.push(ui.is_enabled());
+            self.observed_opacity.push(ui.opacity());
+        }
+        fn drag_opacity(&self, _: &Context, _: &DropRequest<'_, u32>) -> f32 {
+            self.opacity
         }
         fn resolve_drag(&mut self, _: &Context, _: &DockStyle, request: &DropRequest<'_, u32>) -> Option<DropFeedback> {
             self.rect = request.floating_rect;
@@ -1365,9 +1371,11 @@ fn live_drag_renders_body_once_disabled_with_independent_float_size() {
     let area = Id::new("live-test");
     let layout = Layout { root: Some(Node::Tabs { panels: vec![1u32], active: 0 }), floating: Vec::new() };
     let before = layout.clone();
-    let mut content = Content { bodies: Vec::new(), rect: None };
-    for step in 0..3 {
+    let mut content = Content { bodies: Vec::new(), rect: None, opacity: 1.0, observed_opacity: Vec::new() };
+    for (step, (opacity, expected)) in [(1.0, 1.0), (0.7, 0.7), (1.0, 1.0), (f32::NAN, 1.0), (-1.0, 0.0), (2.0, 1.0)].into_iter().enumerate() {
         content.bodies.clear();
+        content.observed_opacity.clear();
+        content.opacity = opacity;
         let events = if step == 0 {
             vec![
                 Event::PointerMoved(pos2(30.0, 20.0)),
@@ -1394,6 +1402,7 @@ fn live_drag_renders_body_once_disabled_with_independent_float_size() {
         .textures_delta
         .clear();
         assert_eq!(content.bodies, [false], "source body must be blank and moving body must be disabled");
+        assert_eq!(content.observed_opacity, [expected]);
         assert_eq!(layout, before);
     }
     cancel_drag::<u32>(&ctx, area);
