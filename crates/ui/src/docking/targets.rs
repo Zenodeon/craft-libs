@@ -84,8 +84,8 @@ pub fn resolve_drop<P: Clone + Eq>(panel: &P, pointer: Pos2, targets: &[DropTarg
         // Clamp the full marker, not just opposite endpoints: clipped/overflowed tab
         // rectangles can extend beyond either edge of the visible strip.
         let width = strip.width().min(2.0);
-        let left = (x - width * 0.5).clamp(strip.left(), strip.right() - width);
-        let insertion = Rect::from_min_max(pos2(left, strip.top()), pos2(left + width, strip.bottom()));
+        let left = (x - width * 0.5).max(strip.left()).min((strip.right() - width).max(strip.left()));
+        let insertion = Rect::from_min_max(pos2(left, strip.top()), pos2((left + width).min(strip.right()), strip.bottom()));
         let old_order: Vec<_> = target.tabs.iter().map(|(p, _)| p).collect();
         let mut order = old_order.clone();
         let noop = if before_panel.as_ref() == Some(panel) {

@@ -1283,3 +1283,12 @@ fn floating_border_and_empty_header_move_and_cancel_as_a_group() {
         assert_eq!(layout.floating[0].rect, original);
     }
 }
+
+#[test]
+fn insertion_marker_handles_subpixel_strip_crossing_zero_without_panicking() {
+    let rect = Rect::from_min_max(pos2(-0.001, 0.0), pos2(0.002, 30.0));
+    let target = DropTarget { anchor: 1, rect, tab_strip: Some(rect), tabs: vec![(1, rect)], allow_splits: true, accepts_tabs: true };
+    let proposal = resolve_drop(&1, pos2(0.0, 12.0), &[target]).unwrap();
+    assert!(proposal.noop);
+    assert!(rect.contains_rect(proposal.insertion.unwrap()));
+}
