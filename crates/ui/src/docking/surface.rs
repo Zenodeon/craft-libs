@@ -227,10 +227,16 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<P> {
         let matches = |id: Id| id == focused;
         let group = |panels: &[P]| {
             panels.iter().any(|panel| matches(self.id.with(("tab", panel))) || matches(self.id.with(("overflow", panel))))
-                || matches(self.id.with(("move-group", panels.first())))
+                || ["move-group", "move-group-header", "move-group-border"].iter().any(|name| matches(self.id.with((*name, panels.first()))))
         };
         for floating in &layout.floating {
-            if group(&floating.panels) || floating.panels.first().is_some_and(|first| matches(self.id.with(("floating", first)).with("resize"))) {
+            if group(&floating.panels)
+                || floating.panels.first().is_some_and(|first| {
+                    ["resize", "resize-left", "resize-right", "resize-bottom", "resize-bottom-left"]
+                        .iter()
+                        .any(|name| matches(self.id.with(("floating", first)).with(*name)))
+                })
+            {
                 return true;
             }
         }
@@ -376,7 +382,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
     fn register_interaction(&mut self, ctx: &Context, id: Id) {
         // A validated tree has at most 2*MAX_PANELS nodes. Tabs, stack dividers,
         // floating grips/corners and splits fit comfortably inside this fixed bound.
-        const CAP: usize = 8 * super::MAX_PANELS;
+        const CAP: usize = 16 * super::MAX_PANELS;
         if self.owned_interactions.len() < CAP && !self.owned_interactions.contains(&id) {
             self.owned_interactions.push(id);
         }
@@ -449,7 +455,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                     ui.painter().with_clip_rect(collapse).text(
                         collapse.center(),
                         egui::Align2::CENTER_CENTER,
-                        if entry.open { "−" } else { "+" },
+                        if entry.open { "ÃƒÆ’Ã‚Â¢Ãƒâ€¹Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢" } else { "+" },
                         self.style.font.clone(),
                         self.style.text,
                     );
@@ -529,6 +535,38 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         }
     }
 
+    fn move_floating_group(&mut self, ui: &mut Ui, panels: &[P], rect: Rect, hit: Rect, id: Id) {
+        if !super::targets::usable(hit) {
+            return;
+        }
+        let response = ui.interact(hit, id, Sense::drag()).on_hover_cursor(egui::CursorIcon::Grab);
+        self.register_interaction(ui.ctx(), response.id);
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &self.style.move_label));
+        if panels.iter().all(|p| (self.permissions)(p).movable)
+            && response.drag_started()
+            && let Some(first) = panels.first()
+        {
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(
+                    self.id.with("group-drag"),
+                    GroupDrag { panel: first.clone(), original: [rect.left(), rect.top(), rect.width(), rect.height()] },
+                )
+            });
+        }
+        if panels.iter().all(|p| (self.permissions)(p).movable)
+            && response.dragged()
+            && ui.ctx().data(|d| d.get_temp::<GroupDrag<P>>(self.id.with("group-drag"))).is_some()
+            && !ui.input(|i| i.key_pressed(Key::Escape) || !i.focused)
+        {
+            let moved = clamp_float(rect.translate(ui.input(|i| i.pointer.delta())), ui.ctx().content_rect());
+            if let Some(first) = panels.first() {
+                self.output
+                    .actions
+                    .push(Action::MoveFloating { panel: first.clone(), rect: [moved.left(), moved.top(), moved.width(), moved.height()] });
+            }
+        }
+    }
+
     fn group(&mut self, ui: &mut Ui, panels: &[P], active: usize, rect: Rect, floating: bool) {
         let Some(selected) = panels.get(active) else { return };
         self.content.group_rect(ui.ctx(), panels, rect);
@@ -550,32 +588,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         ui.painter().rect_filled(strip, 0.0, self.style.tab_background);
         if floating {
             let grip = Rect::from_min_max(strip.min, pos2((strip.left() + 12.0).min(strip.right()), strip.bottom()));
-            let response = ui.interact(grip, self.id.with(("move-group", panels.first())), Sense::drag()).on_hover_cursor(egui::CursorIcon::Grab);
-            self.register_interaction(ui.ctx(), response.id);
-            response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &self.style.move_label));
-            if panels.iter().all(|p| (self.permissions)(p).movable)
-                && response.drag_started()
-                && let Some(first) = panels.first()
-            {
-                ui.ctx().data_mut(|d| {
-                    d.insert_temp(
-                        self.id.with("group-drag"),
-                        GroupDrag { panel: first.clone(), original: [rect.left(), rect.top(), rect.width(), rect.height()] },
-                    )
-                });
-            }
-            if panels.iter().all(|p| (self.permissions)(p).movable)
-                && response.dragged()
-                && ui.ctx().data(|d| d.get_temp::<GroupDrag<P>>(self.id.with("group-drag"))).is_some()
-                && !ui.input(|i| i.key_pressed(Key::Escape) || !i.focused)
-            {
-                let moved = clamp_float(rect.translate(ui.input(|i| i.pointer.delta())), ui.ctx().content_rect());
-                if let Some(first) = panels.first() {
-                    self.output
-                        .actions
-                        .push(Action::MoveFloating { panel: first.clone(), rect: [moved.left(), moved.top(), moved.width(), moved.height()] });
-                }
-            }
+            self.move_floating_group(ui, panels, rect, grip, self.id.with(("move-group", panels.first())));
             ui.painter().line_segment([grip.center() - vec2(0.0, 5.0), grip.center() + vec2(0.0, 5.0)], self.style.border);
             strip.min.x = grip.right();
         }
@@ -612,7 +625,13 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             let overflow = Rect::from_min_size(pos2(x, strip.top()), vec2(fit.overflow_width, strip.height()));
             let response = ui.interact(overflow, self.id.with(("overflow", selected)), Sense::click());
             response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &self.style.panels_label));
-            ui.painter().with_clip_rect(overflow).text(overflow.center(), egui::Align2::CENTER_CENTER, "…", self.style.font.clone(), self.style.text);
+            ui.painter().with_clip_rect(overflow).text(
+                overflow.center(),
+                egui::Align2::CENTER_CENTER,
+                "ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦",
+                self.style.font.clone(),
+                self.style.text,
+            );
             egui::Popup::menu(&response).show(|ui| {
                 egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
                     for index in &fit.overflow {
@@ -626,6 +645,15 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                     }
                 });
             });
+        }
+        if !fit.overflow.is_empty() {
+            x += fit.overflow_width;
+        }
+        if floating {
+            let blank = Rect::from_min_max(pos2(x, strip.top()), pos2((strip.right() - header_width).max(x), strip.bottom()));
+            self.move_floating_group(ui, panels, rect, blank, self.id.with(("move-group-header", panels.first())));
+            let border = Rect::from_min_max(rect.min, pos2(rect.right(), (rect.top() + 4.0).min(strip.bottom())));
+            self.move_floating_group(ui, panels, rect, border, self.id.with(("move-group-border", panels.first())));
         }
         // Retain logical order even when overflow hides a tab; hidden identities have no hit area.
         let targets = panels
@@ -751,42 +779,96 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 let rect = Rect::from_min_size(ui.min_rect().min, rect.size());
                 ui.allocate_rect(rect, Sense::hover());
                 self.group(ui, &group.panels, group.active, rect, true);
-                let corner = Rect::from_min_max((rect.max - vec2(12.0, 12.0)).max(rect.min), rect.max);
-                let response = ui.interact(corner, id.with("resize"), Sense::drag()).on_hover_cursor(egui::CursorIcon::ResizeNwSe);
-                self.register_interaction(ui.ctx(), response.id);
-                response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &self.style.resize_window_label));
-                if response.drag_started() {
-                    response.request_focus();
-                }
-                let mut delta = if response.dragged() { ui.input(|i| i.pointer.delta()) } else { Vec2::ZERO };
-                if response.has_focus() {
-                    ui.memory_mut(|memory| {
-                        memory.set_focus_lock_filter(
-                            response.id,
-                            egui::EventFilter { horizontal_arrows: true, vertical_arrows: true, ..Default::default() },
-                        )
-                    });
-                    ui.input_mut(|input| {
-                        if input.consume_key(egui::Modifiers::NONE, Key::ArrowLeft) {
-                            delta.x -= 8.0;
-                        }
-                        if input.consume_key(egui::Modifiers::NONE, Key::ArrowRight) {
-                            delta.x += 8.0;
-                        }
-                        if input.consume_key(egui::Modifiers::NONE, Key::ArrowUp) {
-                            delta.y -= 8.0;
-                        }
-                        if input.consume_key(egui::Modifiers::NONE, Key::ArrowDown) {
-                            delta.y += 8.0;
-                        }
-                    });
-                }
-                if response.enabled() && delta != Vec2::ZERO {
-                    let size = (rect.size() + delta).max(limits.min.max(vec2(40.0, self.style.tab_height + 20.0))).min(limits.max).min(screen.size());
-                    self.output.actions.push(Action::MoveFloating { panel: first.clone(), rect: [rect.left(), rect.top(), size.x, size.y] });
-                }
-                if response.hovered() || response.dragged() || response.has_focus() {
-                    ui.painter().line_segment([corner.left_bottom(), corner.right_top()], Stroke::new(2.0, self.style.accent));
+                let corners = [
+                    ("resize", Rect::from_min_max((rect.max - vec2(12.0, 12.0)).max(rect.min), rect.max), vec2(1.0, 1.0)),
+                    (
+                        "resize-left",
+                        Rect::from_min_max(pos2(rect.left(), rect.top() + 12.0), pos2((rect.left() + 4.0).min(rect.right()), rect.bottom() - 12.0)),
+                        vec2(-1.0, 0.0),
+                    ),
+                    (
+                        "resize-right",
+                        Rect::from_min_max(pos2((rect.right() - 4.0).max(rect.left()), rect.top() + 12.0), pos2(rect.right(), rect.bottom() - 12.0)),
+                        vec2(1.0, 0.0),
+                    ),
+                    (
+                        "resize-bottom",
+                        Rect::from_min_max(pos2(rect.left() + 12.0, (rect.bottom() - 4.0).max(rect.top())), pos2(rect.right() - 12.0, rect.bottom())),
+                        vec2(0.0, 1.0),
+                    ),
+                    (
+                        "resize-bottom-left",
+                        Rect::from_min_max(
+                            pos2(rect.left(), (rect.bottom() - 12.0).max(rect.top())),
+                            pos2((rect.left() + 12.0).min(rect.right()), rect.bottom()),
+                        ),
+                        vec2(-1.0, 1.0),
+                    ),
+                ];
+                for (name, corner, direction) in corners {
+                    if !super::targets::usable(corner) {
+                        continue;
+                    }
+                    let cursor = if direction.x == 0.0 {
+                        egui::CursorIcon::ResizeVertical
+                    } else if direction.y == 0.0 {
+                        egui::CursorIcon::ResizeHorizontal
+                    } else if direction.x == direction.y {
+                        egui::CursorIcon::ResizeNwSe
+                    } else {
+                        egui::CursorIcon::ResizeNeSw
+                    };
+                    let response = ui.interact(corner, id.with(name), Sense::drag()).on_hover_cursor(cursor);
+                    self.register_interaction(ui.ctx(), response.id);
+                    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &self.style.resize_window_label));
+                    if response.drag_started() {
+                        response.request_focus();
+                    }
+                    let mut delta = if response.dragged() { ui.input(|i| i.pointer.delta()) } else { Vec2::ZERO };
+                    if response.has_focus() {
+                        ui.memory_mut(|memory| {
+                            memory.set_focus_lock_filter(
+                                response.id,
+                                egui::EventFilter { horizontal_arrows: true, vertical_arrows: true, ..Default::default() },
+                            )
+                        });
+                        ui.input_mut(|input| {
+                            if input.consume_key(egui::Modifiers::NONE, Key::ArrowLeft) {
+                                delta.x -= 8.0;
+                            }
+                            if input.consume_key(egui::Modifiers::NONE, Key::ArrowRight) {
+                                delta.x += 8.0;
+                            }
+                            if input.consume_key(egui::Modifiers::NONE, Key::ArrowUp) {
+                                delta.y -= 8.0;
+                            }
+                            if input.consume_key(egui::Modifiers::NONE, Key::ArrowDown) {
+                                delta.y += 8.0;
+                            }
+                        });
+                    }
+                    if response.enabled()
+                        && group.panels.iter().all(|panel| (self.permissions)(panel).movable)
+                        && delta != Vec2::ZERO
+                        && !ui.input(|input| input.key_pressed(Key::Escape) || !input.focused)
+                    {
+                        let size = (rect.size() + delta * direction)
+                            .max(limits.min.max(vec2(40.0, self.style.tab_height + 20.0)))
+                            .min(limits.max)
+                            .min(screen.size());
+                        let min = pos2(
+                            if direction.x < 0.0 { rect.right() - size.x } else { rect.left() },
+                            if direction.y < 0.0 { rect.bottom() - size.y } else { rect.top() },
+                        );
+                        let resized = clamp_float(Rect::from_min_size(min, size), screen);
+                        self.output.actions.push(Action::MoveFloating {
+                            panel: first.clone(),
+                            rect: [resized.left(), resized.top(), resized.width(), resized.height()],
+                        });
+                    }
+                    if name == "resize" && (response.hovered() || response.dragged() || response.has_focus()) {
+                        ui.painter().line_segment([corner.left_bottom(), corner.right_top()], Stroke::new(2.0, self.style.accent));
+                    }
                 }
             });
         }
@@ -882,7 +964,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             return;
         }
         let proposal = resolve_drop(&drag.panel, pointer, &self.targets);
-        if proposal.as_ref().is_some_and(|proposal| proposal.noop) {
+        if released && proposal.as_ref().is_some_and(|proposal| proposal.noop) {
             if released {
                 cancel_drag::<P>(ctx, self.id);
             }
@@ -916,13 +998,17 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         }
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, self.id.with("drop-preview")));
         if let Some(proposal) = proposal {
-            painter.rect(
-                proposal.preview.shrink(1.0),
-                0.0,
-                self.style.accent.gamma_multiply(0.15),
-                Stroke::new(2.0, self.style.accent),
-                StrokeKind::Inside,
-            );
+            let same_group = proposal.insertion.is_some()
+                && self.targets.iter().any(|target| target.rect == proposal.preview && target.tabs.iter().any(|(panel, _)| panel == &drag.panel));
+            if !same_group {
+                painter.rect(
+                    proposal.preview.shrink(1.0),
+                    0.0,
+                    self.style.accent.gamma_multiply(0.15),
+                    Stroke::new(2.0, self.style.accent),
+                    StrokeKind::Inside,
+                );
+            }
             if let Some(marker) = proposal.insertion {
                 painter.rect_filled(marker, 0.0, self.style.accent);
             }

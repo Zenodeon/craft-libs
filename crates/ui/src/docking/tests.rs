@@ -696,7 +696,7 @@ impl DockContent<u32> for CustomContent {
     fn group_header(&mut self, ui: &mut egui::Ui, _: &[u32], _: &u32, _: bool) {
         self.headers += 1;
         assert!(ui.max_rect().width() <= 40.0);
-        ui.label("⋮");
+        ui.label("ÃƒÂ¢Ã¢â‚¬Â¹Ã‚Â®");
     }
 }
 
@@ -1080,8 +1080,12 @@ fn popup_action_labels_use_custom_visual_text_and_logical_accessibility() {
             h.output().shapes.iter().any(|shape| paints(&shape.shape, &format!("Action visual: {logical}"))),
             "custom action must paint: {logical}"
         );
-        // This sample also has a floating-group grip labeled Move to group.
-        let expected = if logical == "Move to group" { 2 } else { 1 };
+        // Floating chrome shares the translated move label with the menu action.
+        let chrome = ["move-group", "move-group-header", "move-group-border"]
+            .iter()
+            .filter(|name| h.ctx.read_response(Id::new("action-label-test").with((**name, Some(&5u32)))).is_some())
+            .count();
+        let expected = if logical == "Move to group" { 1 + chrome } else { 1 };
         assert_eq!(h.query_all_by_label(logical).count(), expected, "popup action must retain its own logical accessibility: {logical}");
         assert_eq!(
             h.query_all_by_label(&format!("Action visual: {logical}")).count(),
@@ -1092,7 +1096,7 @@ fn popup_action_labels_use_custom_visual_text_and_logical_accessibility() {
 }
 
 #[test]
-fn unchanged_tab_slots_are_explicit_noops_without_insertion_markers() {
+fn unchanged_tab_slots_are_explicit_noops_with_bounded_insertion_markers() {
     let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 200.0));
     let target = DropTarget {
         anchor: 1,
@@ -1110,7 +1114,7 @@ fn unchanged_tab_slots_are_explicit_noops_without_insertion_markers() {
         for x in positions {
             let proposal = resolve_drop(&panel, pos2(x, 12.0), std::slice::from_ref(&target)).unwrap();
             assert!(proposal.noop, "{panel}/{x}");
-            assert!(proposal.insertion.is_none());
+            assert!(target.tab_strip.unwrap().contains_rect(proposal.insertion.unwrap()));
         }
     }
     for (panel, x) in [(1, 140.0), (3, 10.0), (2, 210.0)] {
@@ -1230,4 +1234,52 @@ fn overflow_noop_detection_uses_logical_order_including_hidden_tabs() {
     // Before the next visible tab crosses hidden tab 2 and really changes the order.
     assert!(!resolve_drop(&1, pos2(65.0, 12.0), std::slice::from_ref(&target)).unwrap().noop);
     assert!(resolve_drop(&3, pos2(130.0, 12.0), std::slice::from_ref(&target)).unwrap().noop);
+}
+
+#[test]
+fn insertion_markers_stay_inside_clipped_and_singleton_strips() {
+    for width in [0.5, 1.0, 20.0, 140.0] {
+        let rect = Rect::from_min_size(pos2(10.0, 20.0), vec2(width, 200.0));
+        let strip = Rect::from_min_size(rect.min, vec2(width, 30.0));
+        for tab_left in [-100.0, 10.0, 300.0] {
+            let target = DropTarget {
+                anchor: 1,
+                rect,
+                tab_strip: Some(strip.expand(5.0)),
+                tabs: vec![(1, Rect::from_min_size(pos2(tab_left, 20.0), vec2(60.0, 30.0)))],
+                allow_splits: true,
+                accepts_tabs: true,
+            };
+            for x in [rect.left(), rect.center().x, rect.right()] {
+                let proposal = resolve_drop(&1, pos2(x, 25.0), std::slice::from_ref(&target)).unwrap();
+                assert!(proposal.noop);
+                let marker = proposal.insertion.unwrap();
+                assert!(rect.intersect(target.tab_strip.unwrap()).contains_rect(marker));
+                assert!(marker.width() > 0.0 && marker.width() <= 2.0);
+            }
+        }
+    }
+}
+
+#[test]
+fn floating_border_and_empty_header_move_and_cancel_as_a_group() {
+    for name in ["move-group-border", "move-group-header"] {
+        let ctx = Context::default();
+        let mut layout = sample();
+        let original = layout.floating[0].rect;
+        for _ in 0..2 {
+            step(&ctx, &mut layout, vec![]);
+        }
+        let response = ctx.read_response(Id::new("test-area").with((name, Some(&5u32)))).unwrap();
+        let from = response.rect.center();
+        step(&ctx, &mut layout, vec![Event::PointerMoved(from), pointer_button(from, true)]);
+        step(&ctx, &mut layout, vec![Event::PointerMoved(from + vec2(50.0, 40.0))]);
+        assert!((layout.floating[0].rect[0] - original[0] - 50.0).abs() < 1.0);
+        step(
+            &ctx,
+            &mut layout,
+            vec![Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }],
+        );
+        assert_eq!(layout.floating[0].rect, original);
+    }
 }

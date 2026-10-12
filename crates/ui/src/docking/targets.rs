@@ -70,17 +70,8 @@ pub fn resolve_drop<P: Clone + Eq>(panel: &P, pointer: Pos2, targets: &[DropTarg
     if target.tabs.len() > super::MAX_PANELS {
         return None;
     }
-    if &target.anchor == panel && target.tabs.iter().all(|(p, _)| p == panel) && target.tab_strip.is_some_and(|strip| strip.contains(pointer)) {
-        return Some(DropProposal {
-            anchor: panel.clone(),
-            placement: Placement::Tab { before: Some(panel.clone()) },
-            preview: target.rect,
-            insertion: None,
-            noop: true,
-        });
-    }
-    let anchor = if &target.anchor == panel { target.tabs.iter().find(|(p, _)| p != panel).map(|(p, _)| p)? } else { &target.anchor };
-    let strip = target.tab_strip.filter(|r| usable(*r) && r.contains(pointer));
+    let anchor = if &target.anchor == panel { target.tabs.iter().find(|(p, _)| p != panel).map(|(p, _)| p).unwrap_or(panel) } else { &target.anchor };
+    let strip = target.tab_strip.map(|strip| strip.intersect(target.rect)).filter(|r| usable(*r) && r.contains(pointer));
     if let Some(strip) = strip {
         if !target.accepts_tabs {
             return None;
@@ -90,7 +81,11 @@ pub fn resolve_drop<P: Clone + Eq>(panel: &P, pointer: Pos2, targets: &[DropTarg
         let x = before.map(|(_, r)| r.left()).unwrap_or_else(|| {
             target.tabs.iter().filter(|(_, r)| usable(*r)).map(|(_, r)| r.right()).fold(strip.left(), f32::max).min(strip.right())
         });
-        let insertion = Rect::from_min_max(pos2((x - 1.0).max(strip.left()), strip.top()), pos2((x + 1.0).min(strip.right()), strip.bottom()));
+        // Clamp the full marker, not just opposite endpoints: clipped/overflowed tab
+        // rectangles can extend beyond either edge of the visible strip.
+        let width = strip.width().min(2.0);
+        let left = (x - width * 0.5).clamp(strip.left(), strip.right() - width);
+        let insertion = Rect::from_min_max(pos2(left, strip.top()), pos2(left + width, strip.bottom()));
         let old_order: Vec<_> = target.tabs.iter().map(|(p, _)| p).collect();
         let mut order = old_order.clone();
         let noop = if before_panel.as_ref() == Some(panel) {
@@ -107,9 +102,12 @@ pub fn resolve_drop<P: Clone + Eq>(panel: &P, pointer: Pos2, targets: &[DropTarg
             anchor: anchor.clone(),
             placement: Placement::Tab { before: before_panel },
             preview: target.rect,
-            insertion: (!noop).then_some(insertion),
+            insertion: Some(insertion),
             noop,
         });
+    }
+    if anchor == panel {
+        return None;
     }
     let zone = if target.allow_splits { drop_zone(target.rect, 0.0, pointer)? } else { Zone::Center };
     if zone == Zone::Center {
