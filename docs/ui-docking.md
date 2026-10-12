@@ -181,3 +181,20 @@ their own opacity. The moving UI remains disabled at every opacity.
 returned duration in seconds (default zero). The transition starts at the current opacity,
 requests repaint while active, and is cleared on drag completion or cancellation. Destination
 feedback remains independent of this animation.
+
+## Display-only docking candidates
+
+`DockContent::preview_layout` can provide a validated temporary layout before bodies render.
+It receives the pending drag request against the authoritative surface's cached targets, or
+None when no gesture is active. A host coordinating surfaces should prepare one transaction
+and return its corresponding projection for each surface. The saved model remains the layout
+passed to DockArea; preview controls are disabled and render-time structural actions are discarded.
+Targets are frozen during live dragging, so displaying a split cannot change the target beneath
+the pointer. `preview_targets` reports measured display targets separately, allowing insertion
+feedback to follow the visible strip via `tab_insertion_marker` without changing drop resolution.
+`paint_preview` paints additional host feedback after the moving UI, independently of its opacity.
+A host must discard candidates on cancellation and commit only through resolve_drag on release.
+
+Floating areas paint their complete background beneath the tab strip and disable automatic Area
+appearance fading. Transparent theme tab-strip colors therefore reveal the panel background,
+not the canvas. The host's intentional moving-UI opacity continues to apply during dragging.

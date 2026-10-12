@@ -59,6 +59,25 @@ pub fn zone_rect(rect: Rect, zone: Zone) -> Option<Rect> {
     })
 }
 
+/// Bounded insertion marker for a logical slot in a measured tab strip. Hidden tabs
+/// retain their order; their slot uses the next visible boundary or the visible strip end.
+pub fn tab_insertion_marker<P: Eq>(target: &DropTarget<P>, before: Option<&P>) -> Option<Rect> {
+    if target.tabs.len() > super::MAX_PANELS || !target.accepts_tabs || !usable(target.rect) {
+        return None;
+    }
+    let strip = target.tab_strip?.intersect(target.rect);
+    if !usable(strip) {
+        return None;
+    }
+    let index = before.and_then(|before| target.tabs.iter().position(|(panel, _)| panel == before));
+    let x = index.and_then(|index| target.tabs.get(index..))
+        .and_then(|tabs| tabs.iter().find(|(_, rect)| usable(*rect)).map(|(_, rect)| rect.left()))
+        .unwrap_or_else(|| target.tabs.iter().filter(|(_, rect)| usable(*rect)).map(|(_, rect)| rect.right()).fold(strip.left(), f32::max).min(strip.right()));
+    let width = strip.width().min(2.0);
+    let left = (x - width * 0.5).max(strip.left()).min((strip.right() - width).max(strip.left()));
+    Some(Rect::from_min_max(pos2(left, strip.top()), pos2((left + width).min(strip.right()), strip.bottom())))
+}
+
 /// Resolve a pointer against visible groups. The frontmost containing group occludes groups
 /// behind it even if it rejects the drop. A strip reorders by midpoint; the body of the source
 /// group is a no-op at center. Floating groups normally set `allow_splits` to false.
@@ -78,14 +97,7 @@ pub fn resolve_drop<P: Clone + Eq>(panel: &P, pointer: Pos2, targets: &[DropTarg
         }
         let before = target.tabs.iter().filter(|(_, r)| usable(*r)).find(|(_, r)| pointer.x < r.center().x);
         let before_panel = before.map(|(p, _)| p.clone());
-        let x = before.map(|(_, r)| r.left()).unwrap_or_else(|| {
-            target.tabs.iter().filter(|(_, r)| usable(*r)).map(|(_, r)| r.right()).fold(strip.left(), f32::max).min(strip.right())
-        });
-        // Clamp the full marker, not just opposite endpoints: clipped/overflowed tab
-        // rectangles can extend beyond either edge of the visible strip.
-        let width = strip.width().min(2.0);
-        let left = (x - width * 0.5).max(strip.left()).min((strip.right() - width).max(strip.left()));
-        let insertion = Rect::from_min_max(pos2(left, strip.top()), pos2((left + width).min(strip.right()), strip.bottom()));
+        let insertion = tab_insertion_marker(target, before_panel.as_ref())?;
         let old_order: Vec<_> = target.tabs.iter().map(|(p, _)| p).collect();
         let mut order = old_order.clone();
         let noop = if before_panel.as_ref() == Some(panel) {

@@ -189,6 +189,19 @@ pub trait DockContent<P> {
         None
     }
 
+    /// Optional display-only arrangement prepared before bodies render. Interaction targets
+    /// and emitted actions continue to use the authoritative layout passed to DockArea.
+    /// Called on every surface; request is absent when there is no active gesture.
+    fn preview_layout(&mut self, _ctx: &Context, _style: &DockStyle, _request: Option<&DropRequest<'_, P>>) -> Option<Layout<P>> {
+        None
+    }
+
+    /// Measured display targets, for aligning feedback with a temporary layout. These
+    /// never replace authoritative targets used to resolve the pointer.
+    fn preview_targets(&mut self, _ctx: &Context, _targets: &[DropTarget<P>]) {}
+    /// Paint host-owned display feedback after the moving UI, independently of its opacity.
+    fn paint_preview(&mut self, _ctx: &Context) {}
+
     fn label(&mut self, _ui: &Ui, _panel: &P, logical: &str, _font: &FontId, _color: Color32) -> egui::WidgetText {
         logical.into()
     }
@@ -393,14 +406,45 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<P> {
             owned_interactions: Vec::new(),
             output: DockOutput::default(),
             workspace: rect,
+            previewing: false,
         };
-        if let Some(root) = &layout.root {
-            renderer.node(ui, root, rect, &mut Vec::new());
+        let targets_key = self.surface.with("authoritative-targets");
+        let cached = ui.ctx().data(|d| d.get_temp::<Vec<DropTarget<P>>>(targets_key)).unwrap_or_default();
+        renderer.targets = cached.clone();
+        let preview = renderer.prepare_preview(ui.ctx())
+            .filter(|layout| layout.validate().is_ok() && layout.panels().into_iter().all(|panel| limits(panel).valid()));
+        let display = preview.as_ref().unwrap_or(layout);
+        renderer.previewing = preview.is_some();
+        let dragging = renderer.content.live_drag() && ui.ctx().data(|d| {
+            d.get_temp::<Drag<P>>(self.id.with("drag")).is_some() || d.get_temp::<GroupDrag<P>>(self.id.with("group-drag")).is_some()
+        });
+        renderer.targets.clear();
+        if let Some(root) = &display.root {
+            ui.scope(|ui| {
+                if preview.is_some() {
+                    ui.visuals_mut().disabled_alpha = 1.0;
+                    ui.disable();
+                }
+                renderer.node(ui, root, rect, &mut Vec::new());
+            });
             ui.allocate_rect(rect, Sense::hover());
         }
-        renderer.floating(ui.ctx());
+        renderer.floating(ui.ctx(), display, preview.is_some());
+        if preview.is_some() {
+            renderer.content.preview_targets(ui.ctx(), &renderer.targets);
+        }
+        if dragging && !cached.is_empty() {
+            renderer.targets = cached;
+        } else if preview.is_none() {
+            ui.ctx().data_mut(|d| d.insert_temp(targets_key, renderer.targets.clone()));
+        }
         renderer.content.drop_targets(ui.ctx(), &renderer.targets);
         renderer.drag_ui(ui.ctx());
+        renderer.content.paint_preview(ui.ctx());
+        if preview.is_some() {
+            renderer.output.actions.clear();
+            renderer.output.focused = None;
+        }
         renderer.finish_group_drag(ui.ctx());
         renderer.finish_drag(ui.ctx());
         ui.ctx().data_mut(|d| d.insert_temp(self.id.with("owned-interactions"), renderer.owned_interactions));
@@ -410,6 +454,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<P> {
 
 struct Renderer<'a, P> {
     workspace: Rect,
+    previewing: bool,
     id: Id,
     surface: Id,
     style: &'a DockStyle,
@@ -568,19 +613,27 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         node_limits(node, self.style, &self.permissions, &self.limits)
     }
 
+    fn moving_panels(&self, ctx: &Context) -> Vec<P> {
+        if !self.content.live_drag() {
+            return Vec::new();
+        }
+        if let Some(drag) = ctx.data(|d| d.get_temp::<Drag<P>>(self.id.with("drag"))) {
+            return self.content.drag_members(ctx, &drag.panel).unwrap_or_else(|| vec![drag.panel]);
+        }
+        if let Some(drag) = ctx.data(|d| d.get_temp::<GroupDrag<P>>(self.id.with("group-drag"))) {
+            return self.content.drag_members(ctx, &drag.panel)
+                .or_else(|| self.layout.floating.iter().find(|g| g.panels.contains(&drag.panel)).map(|g| g.panels.clone()))
+                .unwrap_or_default();
+        }
+        Vec::new()
+    }
+
     fn contents(&mut self, ui: &mut Ui, panel: &P, rect: Rect) {
         if !super::targets::usable(rect) {
             return;
         }
         ui.painter().rect_filled(rect, 0.0, self.style.background);
-        let moving =
-            self.content.live_drag()
-                && (ui.ctx().data(|d| d.get_temp::<Drag<P>>(self.id.with("drag"))).is_some_and(|drag| {
-                    self.content.drag_members(ui.ctx(), &drag.panel).unwrap_or_else(|| vec![drag.panel.clone()]).contains(panel)
-                }) || ui
-                    .ctx()
-                    .data(|d| d.get_temp::<GroupDrag<P>>(self.id.with("group-drag")))
-                    .is_some_and(|drag| self.layout.floating.iter().any(|g| g.panels.contains(&drag.panel) && g.panels.contains(panel))));
+        let moving = self.moving_panels(ui.ctx()).contains(panel);
         if moving {
             return;
         }
@@ -645,11 +698,8 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
     fn group(&mut self, ui: &mut Ui, panels: &[P], active: usize, rect: Rect, floating: bool) {
         let Some(selected) = panels.get(active) else { return };
         self.content.group_rect(ui.ctx(), panels, rect);
-        let tab_drag = ui.ctx().data(|d| d.get_temp::<Drag<P>>(self.id.with("drag")));
-        let group_drag = ui.ctx().data(|d| d.get_temp::<GroupDrag<P>>(self.id.with("group-drag")));
-        let whole = self.content.live_drag()
-            && (group_drag.is_some_and(|d| panels.contains(&d.panel))
-                || tab_drag.is_some_and(|d| panels.contains(&d.panel) && self.content.drag_members(ui.ctx(), &d.panel).is_some_and(|m| m.len() > 1)));
+        let moving = self.moving_panels(ui.ctx());
+        let whole = (self.previewing || moving.len() > 1) && !moving.is_empty() && panels.iter().all(|panel| moving.contains(panel));
         if whole {
             ui.painter().rect_filled(rect, 0.0, self.style.background);
             return;
@@ -834,13 +884,13 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         });
     }
 
-    fn floating(&mut self, ctx: &Context) {
+    fn floating(&mut self, ctx: &Context, display: &Layout<P>, preview: bool) {
         let screen = ctx.content_rect();
         if !super::targets::usable(screen) {
             return;
         }
         let layers = ctx.memory(|memory| memory.layer_ids().collect::<Vec<_>>());
-        let mut groups: Vec<_> = self.layout.floating.iter().collect();
+        let mut groups: Vec<_> = display.floating.iter().collect();
         groups.sort_by_key(|group| {
             let id = group.panels.first().map(|panel| self.id.with(("floating", panel)));
             layers.iter().position(|layer| Some(layer.id) == id).unwrap_or(usize::MAX)
@@ -857,9 +907,17 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 ctx.memory_mut(|memory| memory.request_focus(self.id.with(("tab", self.activation.as_ref().unwrap_or(first)))));
                 self.output.focused = self.activation.clone();
             }
-            egui::Area::new(id).order(egui::Order::Middle).fixed_pos(rect.min).movable(false).constrain_to(screen).show(ctx, |ui| {
+            egui::Area::new(id).fade_in(false).order(egui::Order::Middle).fixed_pos(rect.min).movable(false).constrain_to(screen).show(ctx, |ui| {
                 ui.set_min_size(rect.size());
                 let rect = Rect::from_min_size(ui.min_rect().min, rect.size());
+                ui.set_clip_rect(rect);
+                if preview {
+                    ui.visuals_mut().disabled_alpha = 1.0;
+                    ui.disable();
+                }
+                ui.painter().rect_filled(rect, 0.0, self.style.background);
+                let header = Rect::from_min_max(rect.min, pos2(rect.right(), (rect.top() + self.style.tab_height).min(rect.bottom())));
+                ui.painter().rect_filled(header, 0.0, self.style.tab_background);
                 ui.allocate_rect(rect, Sense::hover());
                 self.group(ui, &group.panels, group.active, rect, true);
                 let corners = [
@@ -955,6 +1013,42 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 }
             });
         }
+    }
+
+    fn prepare_preview(&mut self, ctx: &Context) -> Option<Layout<P>> {
+        let active = ctx.input(|i| i.focused && !i.key_pressed(Key::Escape) && (i.pointer.primary_down() || i.pointer.primary_released()));
+        let pointer = ctx.pointer_interact_pos().filter(|p| p.is_finite());
+        let gesture = if active {
+            if let Some(drag) = ctx.data(|d| d.get_temp::<Drag<P>>(self.id.with("drag"))) {
+                pointer.map(|pointer| {
+                    let floating = ((self.permissions)(&drag.panel).floatable
+                        && (!drag.source.contains(pointer) || self.layout.floating.iter().any(|g| g.panels.contains(&drag.panel))))
+                        .then(|| self.tab_float_rect(ctx, &drag, pointer));
+                    (drag.panel, pointer, floating, false)
+                })
+            } else if let Some(drag) = ctx.data(|d| d.get_temp::<GroupDrag<P>>(self.id.with("group-drag"))) {
+                pointer.map(|pointer| {
+                    let [x, y, w, h] = drag.original;
+                    let rect = clamp_float(Rect::from_min_size(pos2(x, y), vec2(w, h)).translate(pointer - drag.origin), ctx.content_rect());
+                    (drag.panel, pointer, Some(rect), true)
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let request = gesture.as_ref().filter(|(_, pointer, _, _)| !self.blockers.iter().any(|rect| rect.contains(*pointer))).map(|(panel, pointer, rect, whole)| DropRequest {
+            panel,
+            pointer: *pointer,
+            targets: &self.targets,
+            floating_rect: *rect,
+            whole_group: *whole,
+            released: false,
+            workspace: self.workspace,
+            screen: ctx.content_rect(),
+        });
+        self.content.preview_layout(ctx, self.style, request.as_ref())
     }
 
     fn drag_ui(&mut self, ctx: &Context) {
