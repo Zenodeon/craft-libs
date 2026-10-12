@@ -101,4 +101,5 @@ impl<P: Clone + Eq + Send + Sync + 'static> Geometry<P> {
 /// Whether a surface is showing a candidate or finishing its display-only transition.
 pub fn geometry_transition_active<P: Clone + Send + Sync + 'static>(ctx: &Context, surface: Id) -> bool {
     ctx.data(|data| data.get_temp::<Geometry<P>>(surface.with("preview-geometry"))).is_some_and(|state| state.active)
+        || super::strips::active::<P>(ctx, surface)
 }

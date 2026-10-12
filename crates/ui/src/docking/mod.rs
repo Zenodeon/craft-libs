@@ -8,6 +8,7 @@
 mod geometry;
 mod model;
 mod surface;
+mod strips;
 mod targets;
 
 pub use model::{Action, DockError, Floating, Layout, Location, MAX_DEPTH, MAX_PANELS, Node, Permissions, Placement, StackEntry, Zone};

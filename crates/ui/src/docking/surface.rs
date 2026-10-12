@@ -223,6 +223,13 @@ pub trait DockContent<P> {
     /// Animated group bounds and their measured destination, including return/settling frames.
     fn preview_geometry(&mut self, _ctx: &Context, _panels: &[P], _display: Rect, _destination: Rect) {}
 
+    /// Opt into a stationary receiving header by returning its authoritative target snapshot.
+    /// Only header geometry/order is overridden; bodies retain measured preview bounds.
+    /// The snapshot's anchor must belong to the receiving group (not the incoming group).
+    fn preview_tab_strip(&self, _ctx: &Context, _panels: &[P]) -> Option<DropTarget<P>> {
+        None
+    }
+
     fn label(&mut self, _ui: &Ui, _panel: &P, logical: &str, _font: &FontId, _color: Color32) -> egui::WidgetText {
         logical.into()
     }
@@ -412,6 +419,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<P> {
             cancel_drag::<P>(ui.ctx(), self.id);
             return DockOutput { error: Some(DockError::InvalidGeometry), ..Default::default() };
         }
+        let strips = super::strips::Strips::load(ui.ctx(), self.surface, content.preview_geometry_generation());
         let mut renderer = Renderer {
             id: self.id,
             surface: self.surface,
@@ -429,6 +437,8 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<P> {
             workspace: rect,
             previewing: false,
             geometry: None,
+            strips: Some(strips),
+            headers: Vec::new(),
         };
         let targets_key = self.surface.with("authoritative-targets");
         let cached = ui.ctx().data(|d| d.get_temp::<Vec<DropTarget<P>>>(targets_key)).unwrap_or_default();
@@ -452,7 +462,8 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<P> {
         } else {
             ui.ctx().data_mut(|data| data.remove::<super::geometry::Geometry<P>>(self.surface.with("preview-geometry")));
         }
-        let presenting = preview.is_some() || renderer.geometry.as_ref().is_some_and(|state| state.active);
+        let presenting = preview.is_some() || renderer.geometry.as_ref().is_some_and(|state| state.active)
+            || renderer.strips.as_ref().is_some_and(|state| state.active());
         let dragging = renderer.content.live_drag() && ui.ctx().data(|d| {
             d.get_temp::<Drag<P>>(self.id.with("drag")).is_some() || d.get_temp::<GroupDrag<P>>(self.id.with("group-drag")).is_some()
         });
@@ -471,6 +482,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<P> {
             ui.allocate_rect(rect, Sense::hover());
         }
         renderer.floating(ui.ctx(), display, presenting);
+        renderer.header_overlays(ui.ctx());
         if preview.is_some() {
             renderer.content.preview_targets(ui.ctx(), &renderer.targets);
         }
@@ -488,6 +500,9 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<P> {
         }
         renderer.finish_group_drag(ui.ctx());
         renderer.finish_drag(ui.ctx());
+        if let Some(strips) = renderer.strips.take() {
+            strips.finish(ui.ctx(), self.surface);
+        }
         ui.ctx().data_mut(|d| d.insert_temp(self.id.with("owned-interactions"), renderer.owned_interactions));
         renderer.output
     }
@@ -497,6 +512,8 @@ struct Renderer<'a, P> {
     workspace: Rect,
     previewing: bool,
     geometry: Option<super::geometry::Geometry<P>>,
+    strips: Option<super::strips::Strips<P>>,
+    headers: Vec<HeaderJob<P>>,
     id: Id,
     surface: Id,
     style: &'a DockStyle,
@@ -510,6 +527,14 @@ struct Renderer<'a, P> {
     targets: Vec<DropTarget<P>>,
     owned_interactions: Vec<Id>,
     output: DockOutput<P>,
+}
+
+struct HeaderJob<P> {
+    panels: Vec<P>,
+    active: usize,
+    rect: Rect,
+    floating: bool,
+    frozen: Option<DropTarget<P>>,
 }
 
 impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
@@ -575,7 +600,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                     self.output.actions.push(Action::ResizeSplit { path: path.clone(), size });
                 }
             }
-            Node::Tabs { panels, active } => self.group(ui, panels, *active, rect, false),
+            Node::Tabs { panels, active } => self.group(ui, panels, *active, rect, false, rect),
             Node::Stack { entries } => {
                 let total_header = (entries.len() as f32 * self.style.tab_height).min(rect.height());
                 let remaining = (rect.height() - total_header).max(0.0);
@@ -754,7 +779,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         }
     }
 
-    fn group(&mut self, ui: &mut Ui, panels: &[P], active: usize, rect: Rect, floating: bool) {
+    fn group(&mut self, ui: &mut Ui, panels: &[P], active: usize, rect: Rect, floating: bool, destination: Rect) {
         let Some(selected) = panels.get(active) else { return };
         let rect = if floating { rect } else { self.presentation_rect(ui.ctx(), panels, rect) };
         self.content.group_rect(ui.ctx(), panels, rect);
@@ -782,9 +807,38 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             });
             return;
         }
-        let mut strip = Rect::from_min_max(rect.min, pos2(rect.right(), (rect.top() + self.style.tab_height).min(rect.bottom())));
+        let frozen = self.content.preview_tab_strip(ui.ctx(), panels);
+        let options = super::strips::Options {
+            duration: self.content.preview_geometry_duration(),
+            dragging: is_dragging::<P>(ui.ctx(), self.id),
+            returning: self.geometry.as_ref().is_some_and(|state| state.active),
+        };
+        let header = self.strips.as_mut().and_then(|state| state.header(ui.ctx(), panels, destination, frozen, options));
+        if let Some(header) = header {
+            let header_panels = header.frozen.as_ref().map(|target| target.tabs.iter().map(|(panel, _)| panel.clone()).collect::<Vec<_>>())
+                .unwrap_or_else(|| panels.to_vec());
+            let header_active = header.frozen.as_ref().and_then(|target| header_panels.iter().position(|panel| panel == &target.anchor)).unwrap_or(active);
+            self.headers.push(HeaderJob { panels: header_panels, active: header_active, rect: header.rect, floating, frozen: header.frozen });
+        } else {
+            self.header(ui, &HeaderJob { panels: panels.to_vec(), active, rect, floating, frozen: None });
+        }
+        let strip_bottom = (rect.top() + self.style.tab_height).min(rect.bottom());
+        self.contents(ui, selected, Rect::from_min_max(pos2(rect.left(), strip_bottom), rect.max));
+        ui.painter().rect_stroke(rect, 0.0, self.style.border, StrokeKind::Inside);
+    }
+
+    fn header(&mut self, ui: &mut Ui, job: &HeaderJob<P>) {
+        let panels = &job.panels;
+        let active = job.active;
+        let rect = job.rect;
+        let floating = job.floating;
+        let Some(selected) = panels.get(active) else { return };
+        let policy = (self.permissions)(selected);
+        let mut strip = job.frozen.as_ref().and_then(|target| target.tab_strip)
+            .unwrap_or_else(|| Rect::from_min_max(rect.min, pos2(rect.right(), (rect.top() + self.style.tab_height).min(rect.bottom()))));
+        ui.painter().rect_filled(strip, 0.0, self.style.background);
         ui.painter().rect_filled(strip, 0.0, self.style.tab_background);
-        if floating {
+        if floating && job.frozen.is_none() {
             let grip = Rect::from_min_max(strip.min, pos2((strip.left() + 12.0).min(strip.right()), strip.bottom()));
             self.move_floating_group(ui, panels, rect, grip, self.id.with(("move-group", panels.first())));
             ui.painter().line_segment([grip.center() - vec2(0.0, 5.0), grip.center() + vec2(0.0, 5.0)], self.style.border);
@@ -810,23 +864,33 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             })
             .collect();
         let fit = tabs::fit(&widths, active, (strip.width() - header_width).max(0.0), 40.0, 22.0);
+        let shown = job.frozen.as_ref().map(|target| {
+            target.tabs.iter().enumerate().filter(|(_, (_, rect))| super::targets::usable(*rect))
+                .map(|(index, (_, rect))| (index, rect.width())).collect::<Vec<_>>()
+        }).unwrap_or_else(|| fit.shown.clone());
+        let overflow_indices = job.frozen.as_ref().map(|target| {
+            target.tabs.iter().enumerate().filter(|(_, (_, rect))| !super::targets::usable(*rect))
+                .map(|(index, _)| index).collect::<Vec<_>>()
+        }).unwrap_or_else(|| fit.overflow.clone());
+        let overflow_width = if job.frozen.is_some() { 22.0_f32.min((strip.width() - header_width).max(0.0)) } else { fit.overflow_width };
         let mut x = strip.left();
         let mut targets = Vec::new();
-        for (index, width) in &fit.shown {
+        for (index, width) in &shown {
             let Some(panel) = panels.get(*index) else { continue };
-            let tab = Rect::from_min_size(pos2(x, strip.top()), vec2(*width, strip.height()));
+            let tab = job.frozen.as_ref().and_then(|target| target.tabs.iter().find(|(member, _)| member == panel).map(|(_, rect)| *rect))
+                .unwrap_or_else(|| Rect::from_min_size(pos2(x, strip.top()), vec2(*width, strip.height())));
             self.tab(ui, panel, tab, *index == active, rect);
             targets.push((panel.clone(), tab));
-            x += width;
+            x = tab.right();
         }
-        if !fit.overflow.is_empty() && fit.overflow_width > 0.0 {
-            let overflow = Rect::from_min_size(pos2(x, strip.top()), vec2(fit.overflow_width, strip.height()));
+        if !overflow_indices.is_empty() && overflow_width > 0.0 {
+            let overflow = Rect::from_min_size(pos2(x, strip.top()), vec2(overflow_width, strip.height()));
             let response = ui.interact(overflow, self.id.with(("overflow", selected)), Sense::click());
             response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &self.style.panels_label));
             ui.painter().with_clip_rect(overflow).text(overflow.center(), egui::Align2::CENTER_CENTER, "…", self.style.font.clone(), self.style.text);
             egui::Popup::menu(&response).show(|ui| {
                 egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                    for index in &fit.overflow {
+                    for index in &overflow_indices {
                         if let Some(panel) = panels.get(*index)
                             && self.menu_label(ui, panel).clicked()
                         {
@@ -838,8 +902,8 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 });
             });
         }
-        if !fit.overflow.is_empty() {
-            x += fit.overflow_width;
+        if !overflow_indices.is_empty() {
+            x += overflow_width;
         }
         if floating {
             let blank = Rect::from_min_max(pos2(x, strip.top()), pos2((strip.right() - header_width).max(x), strip.bottom()));
@@ -863,8 +927,25 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             allow_splits: !floating,
             accepts_tabs: policy.accepts_tabs,
         });
-        self.contents(ui, selected, Rect::from_min_max(pos2(rect.left(), strip.bottom()), rect.max));
-        ui.painter().rect_stroke(rect, 0.0, self.style.border, StrokeKind::Inside);
+    }
+
+    fn header_overlays(&mut self, ctx: &Context) {
+        for job in std::mem::take(&mut self.headers) {
+            let Some(anchor) = job.panels.first() else { continue };
+            let id = self.surface.with(("preview-strip", anchor));
+            let strip = job.frozen.as_ref().and_then(|target| target.tab_strip)
+                .unwrap_or_else(|| Rect::from_min_max(job.rect.min, pos2(job.rect.right(), (job.rect.top() + self.style.tab_height).min(job.rect.bottom()))));
+            let layer = egui::LayerId::new(egui::Order::Foreground, id);
+            ctx.move_to_top(layer);
+            egui::Area::new(id).fade_in(false).order(egui::Order::Foreground).fixed_pos(strip.min)
+                .movable(false).interactable(false).constrain(false).show(ctx, |ui| {
+                    ui.set_min_size(strip.size());
+                    ui.set_clip_rect(strip.intersect(ctx.content_rect()));
+                    ui.visuals_mut().disabled_alpha = 1.0;
+                    ui.disable();
+                    self.header(ui, &job);
+                });
+        }
     }
 
     fn menu_label(&mut self, ui: &mut Ui, panel: &P) -> egui::Response {
@@ -964,6 +1045,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             let limits = self.node_limits(&Node::Tabs { panels: group.panels.clone(), active: group.active });
             let size = vec2(width, height).max(limits.min).min(limits.max);
             let rect = clamp_float(Rect::from_min_size(pos2(x, y), size), screen);
+            let destination = rect;
             let rect = clamp_float(self.presentation_rect(ctx, &group.panels, rect), screen);
             let id = self.id.with(("floating", first));
             if self.activation.as_ref().is_some_and(|panel| group.panels.contains(panel)) {
@@ -983,7 +1065,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 let header = Rect::from_min_max(rect.min, pos2(rect.right(), (rect.top() + self.style.tab_height).min(rect.bottom())));
                 ui.painter().rect_filled(header, 0.0, self.style.tab_background);
                 ui.allocate_rect(rect, Sense::hover());
-                self.group(ui, &group.panels, group.active, rect, true);
+                self.group(ui, &group.panels, group.active, rect, true, destination);
                 let corners = [
                     ("resize", Rect::from_min_max((rect.max - vec2(12.0, 12.0)).max(rect.min), rect.max), vec2(1.0, 1.0)),
                     (

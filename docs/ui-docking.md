@@ -208,6 +208,19 @@ invalidate history on workspace replacement through `preview_geometry_generation
 `geometry_transition_active` lets a host retain its temporary shell while returning to its
 original layout. Animation state is transient and requests repaint only while bounds move.
 
+`DockContent::preview_tab_strip` optionally returns an authoritative `DropTarget` snapshot
+for a receiving group. Its anchor must remain in the receiver, independently of the dragged
+members. The renderer keeps the snapshot's header position, width, original tab order and
+visible/overflow slots while rendering the candidate body at its animated bounds. Headers
+paint once in a disabled foreground overlay with an opaque theme background; moving content
+and destination feedback retain their own layers. Hosts resolve strip hits against the same
+authoritative snapshot and should give these visible slots priority over coincident edges.
+Incoming tabs appear only after commit. The header settles to the committed group over the
+geometry transition duration; cancellation preserves the original strip while bodies return.
+History is surface-local, generation-scoped and transient. Consumers returning None retain
+their existing header rendering. `geometry_transition_active` includes pending header settling
+so hosts can retain their temporary presentation shell until the complete transition finishes.
+
 Floating areas paint their complete background beneath the tab strip and disable automatic Area
 appearance fading. Transparent theme tab-strip colors therefore reveal the panel background,
 not the canvas. The host's intentional moving-UI opacity continues to apply during dragging.
