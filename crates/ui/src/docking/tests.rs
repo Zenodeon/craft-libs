@@ -1,6 +1,6 @@
 use super::*;
 use crate::layout::{SplitAxis, SplitSize};
-use egui::{Context, Event, Id, Modifiers, PointerButton, RawInput, Rect, pos2, vec2};
+use egui::{Context, Event, Id, Modifiers, PointerButton, Pos2, RawInput, Rect, pos2, vec2};
 
 fn tabs(panels: &[u32], active: usize) -> Node<u32> {
     Node::Tabs { panels: panels.to_vec(), active }
@@ -1089,4 +1089,145 @@ fn popup_action_labels_use_custom_visual_text_and_logical_accessibility() {
             "visual substitution must not replace logical accessibility"
         );
     }
+}
+
+#[test]
+fn unchanged_tab_slots_are_explicit_noops_without_insertion_markers() {
+    let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 200.0));
+    let target = DropTarget {
+        anchor: 1,
+        rect,
+        tab_strip: Some(Rect::from_min_size(rect.min, vec2(300.0, 30.0))),
+        tabs: vec![
+            (1, Rect::from_min_size(pos2(0.0, 0.0), vec2(60.0, 30.0))),
+            (2, Rect::from_min_size(pos2(60.0, 0.0), vec2(60.0, 30.0))),
+            (3, Rect::from_min_size(pos2(120.0, 0.0), vec2(60.0, 30.0))),
+        ],
+        allow_splits: true,
+        accepts_tabs: true,
+    };
+    for (panel, positions) in [(1, [10.0, 50.0]), (2, [70.0, 110.0]), (3, [130.0, 210.0])] {
+        for x in positions {
+            let proposal = resolve_drop(&panel, pos2(x, 12.0), std::slice::from_ref(&target)).unwrap();
+            assert!(proposal.noop, "{panel}/{x}");
+            assert!(proposal.insertion.is_none());
+        }
+    }
+    for (panel, x) in [(1, 140.0), (3, 10.0), (2, 210.0)] {
+        let proposal = resolve_drop(&panel, pos2(x, 12.0), std::slice::from_ref(&target)).unwrap();
+        assert!(!proposal.noop);
+        assert!(proposal.insertion.is_some());
+    }
+}
+
+#[test]
+fn measured_groups_match_renderer_with_protected_canvas_and_tiny_viewports() {
+    struct Content(Vec<(u32, Rect)>);
+    impl DockContent<u32> for Content {
+        fn body(&mut self, _ui: &mut egui::Ui, _panel: &u32) {}
+        fn group_rect(&mut self, _ctx: &Context, panels: &[u32], rect: Rect) {
+            self.0.extend(panels.iter().map(|panel| (*panel, rect)));
+        }
+    }
+    let layout = Layout {
+        root: Some(Node::Split {
+            axis: SplitAxis::Horizontal,
+            size: SplitSize::FixedFirst(340.0),
+            first: Box::new(Node::Tabs { panels: vec![1, 2], active: 0 }),
+            second: Box::new(Node::Tabs { panels: vec![0], active: 0 }),
+        }),
+        floating: vec![Floating { panels: vec![3], active: 0, rect: [500.0, 300.0, 320.0, 400.0] }],
+    };
+    for size in [vec2(1440.0, 1000.0), vec2(320.0, 240.0)] {
+        let ctx = Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, size);
+        let mut actual = Content(Vec::new());
+        let mut measured = Vec::new();
+        ctx.run_ui(RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+            let style = DockStyle::from_ui(ui);
+            let permissions = |p: &u32| if *p == 0 { Permissions::PROTECTED } else { Permissions::default() };
+            let limits = |_: &u32| PanelLimits { min: vec2(240.0, 160.0), ..Default::default() };
+            measured = measure_layout(&layout, ui.available_rect_before_wrap(), screen, &style, permissions, limits).unwrap();
+            DockArea::new(Id::new("measure-test")).show_customized(ui, &layout, &style, |p| p.to_string(), permissions, limits, &mut actual);
+        })
+        .textures_delta
+        .clear();
+        for (panel, expected) in measured {
+            let rect = actual.0.iter().find(|(p, _)| *p == panel).unwrap().1;
+            assert!((rect.min - expected.min).length() < 1.5 && (rect.max - expected.max).length() < 1.5, "{panel}: {rect:?} != {expected:?}");
+        }
+    }
+}
+
+#[test]
+fn host_owned_noop_consumes_release_without_a_fallback_float() {
+    struct Content(usize);
+    impl DockContent<u32> for Content {
+        fn body(&mut self, _ui: &mut egui::Ui, _panel: &u32) {}
+        fn resolve_drag(&mut self, _ctx: &Context, _style: &DockStyle, request: &DropRequest<'_, u32>) -> Option<DropFeedback> {
+            if request.released {
+                self.0 += 1;
+            }
+            Some(DropFeedback::default())
+        }
+    }
+    let ctx = Context::default();
+    let area = Id::new("host-owned");
+    let layout = sample();
+    let mut content = Content(0);
+    let from = pos2(30.0, 20.0);
+    let to = pos2(400.0, 300.0);
+    let render = |events: Vec<Event>, content: &mut Content| {
+        let mut output = DockOutput::default();
+        ctx.run_ui(RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), events, ..Default::default() }, |ui| {
+            output = DockArea::new(area).show_customized(
+                ui,
+                &layout,
+                &DockStyle::from_ui(ui),
+                |p| p.to_string(),
+                |_| Permissions::default(),
+                |_| PanelLimits::default(),
+                content,
+            );
+        })
+        .textures_delta
+        .clear();
+        output
+    };
+    render(
+        vec![
+            Event::PointerMoved(from),
+            Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+        ],
+        &mut content,
+    );
+    assert!(begin_drag(&ctx, area, 1u32, Rect::from_min_size(Pos2::ZERO, vec2(200.0, 200.0))));
+    render(vec![Event::PointerMoved(to)], &mut content);
+    let output = render(
+        vec![Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE }],
+        &mut content,
+    );
+    assert_eq!(content.0, 1);
+    assert!(output.actions.iter().all(|action| !matches!(action, Action::Move { .. } | Action::Float { .. })));
+}
+
+#[test]
+fn overflow_noop_detection_uses_logical_order_including_hidden_tabs() {
+    let rect = Rect::from_min_size(Pos2::ZERO, vec2(140.0, 200.0));
+    let target = DropTarget {
+        anchor: 1,
+        rect,
+        tab_strip: Some(Rect::from_min_size(Pos2::ZERO, vec2(140.0, 30.0))),
+        tabs: vec![
+            (1, Rect::from_min_size(Pos2::ZERO, vec2(60.0, 30.0))),
+            (2, Rect::NOTHING),
+            (3, Rect::from_min_size(pos2(60.0, 0.0), vec2(60.0, 30.0))),
+        ],
+        allow_splits: true,
+        accepts_tabs: true,
+    };
+    assert!(resolve_drop(&1, pos2(10.0, 12.0), std::slice::from_ref(&target)).unwrap().noop);
+    // Before the next visible tab crosses hidden tab 2 and really changes the order.
+    assert!(!resolve_drop(&1, pos2(65.0, 12.0), std::slice::from_ref(&target)).unwrap().noop);
+    assert!(resolve_drop(&3, pos2(130.0, 12.0), std::slice::from_ref(&target)).unwrap().noop);
 }

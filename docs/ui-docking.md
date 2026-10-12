@@ -149,3 +149,9 @@ layouts. Hosts can permit global commands from chrome while reserving Enter, Spa
 Tab, Escape and arrow keys for activation, traversal, cancellation and resizing.
 Content widgets retain their usual keyboard ownership. The renderer owns the IDs;
 hosts do not need to reconstruct them.
+
+## Host-resolved drops and measurement
+
+`DockContent::resolve_drag` optionally owns a tab or floating-group gesture. Its `DropRequest` supplies visible targets, pointer/release state, viewport bounds and the default floating rectangle. Returning `Some(DropFeedback)` consumes the gesture, including explicit no-ops; the host stages/commits its validated transaction on release, and the shared renderer draws only the supplied preview and insertion marker. Returning `None` retains the default resolver.
+
+`measure_layout` returns full group rectangles using the same split constraints, headers, protected-canvas rules and floating clamps as rendering. `DockContent::group_rect` reports actual rendered bounds for host inspection and regression checks. Tab proposals expose `noop`; unchanged insertion slots have no marker and default release emits no move/float.

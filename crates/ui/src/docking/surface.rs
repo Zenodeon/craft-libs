@@ -151,10 +151,33 @@ pub fn cancel_drag<P: Clone + Send + Sync + 'static>(ctx: &Context, area_id: Id)
     }
 }
 
+/// Host-owned drop resolution. Returning feedback consumes the gesture, including no-op
+/// targets. Hosts commit their staged transaction on release; the renderer emits no move.
+pub struct DropRequest<'a, P> {
+    pub panel: &'a P,
+    pub pointer: Pos2,
+    pub targets: &'a [DropTarget<P>],
+    pub floating_rect: Option<Rect>,
+    pub whole_group: bool,
+    pub released: bool,
+    pub workspace: Rect,
+    pub screen: Rect,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DropFeedback {
+    pub preview: Option<Rect>,
+    pub insertion: Option<Rect>,
+}
+
 /// One mutable application adapter owns bodies, menus and shaped text, avoiding competing
 /// mutable closures. Logical labels remain separate and are used for tab accessibility.
 pub trait DockContent<P> {
     fn body(&mut self, ui: &mut Ui, panel: &P);
+    fn resolve_drag(&mut self, _ctx: &Context, _style: &DockStyle, _request: &DropRequest<'_, P>) -> Option<DropFeedback> {
+        None
+    }
+
     fn label(&mut self, _ui: &Ui, _panel: &P, logical: &str, _font: &FontId, _color: Color32) -> egui::WidgetText {
         logical.into()
     }
@@ -163,6 +186,8 @@ pub trait DockContent<P> {
     fn action_label(&mut self, _ui: &Ui, logical: &str, _font: &FontId, _color: Color32) -> egui::WidgetText {
         logical.into()
     }
+    /// Full rendered group bounds, including its tab header.
+    fn group_rect(&mut self, _ctx: &Context, _panels: &[P], _rect: Rect) {}
     fn panel_menu(&mut self, _ui: &mut Ui, _panel: &P) {}
     fn group_header_width(&self, _panels: &[P], _active: &P, _floating: bool) -> f32 {
         0.0
@@ -317,6 +342,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<P> {
             targets: Vec::new(),
             owned_interactions: Vec::new(),
             output: DockOutput::default(),
+            workspace: rect,
         };
         if let Some(root) = &layout.root {
             renderer.node(ui, root, rect, &mut Vec::new());
@@ -331,6 +357,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<P> {
 }
 
 struct Renderer<'a, P> {
+    workspace: Rect,
     id: Id,
     style: &'a DockStyle,
     label: &'a dyn Fn(&P) -> String,
@@ -369,10 +396,10 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         }
         match node {
             Node::Split { axis, size, first, second } => {
-                let Some(wanted) = split_rect(rect, *axis, *size, self.style.gap, 0.0) else { return };
-                let (lo, hi) = split_bounds(wanted.available(), *axis, self.node_limits(first), self.node_limits(second));
-                let first_size = wanted.first_size().clamp(lo, hi);
-                let Some(split) = split_rect(rect, *axis, SplitSize::FixedFirst(first_size), self.style.gap, 0.0) else { return };
+                let Some((split, lo, hi)) = constrained_split(rect, *axis, *size, self.style.gap, self.node_limits(first), self.node_limits(second))
+                else {
+                    return;
+                };
                 path.push(false);
                 self.node(ui, first, split.first, path);
                 path.pop();
@@ -485,49 +512,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
     }
 
     fn node_limits(&self, node: &Node<P>) -> PanelLimits {
-        match node {
-            Node::Tabs { panels, .. } => {
-                let mut limits = PanelLimits::default();
-                for panel in panels {
-                    let policy = (self.limits)(panel);
-                    limits.min = limits.min.max(policy.min).max(Vec2::splat(self.style.min_pane));
-                    limits.max = limits.max.min(policy.max);
-                }
-                limits.max = limits.max.max(limits.min);
-                if panels.len() != 1 || panels.first().is_some_and(|p| (self.permissions)(p) != Permissions::PROTECTED) {
-                    limits.min.y = (limits.min.y + self.style.tab_height).min(1_000_000.0);
-                    limits.max.y = (limits.max.y + self.style.tab_height).min(1_000_000.0);
-                }
-                limits
-            }
-            Node::Stack { entries } => {
-                let mut limits = PanelLimits::default();
-                for entry in entries {
-                    let policy = (self.limits)(&entry.panel);
-                    limits.min.x = limits.min.x.max(policy.min.x).max(self.style.min_pane);
-                    limits.min.y += if entry.open { policy.min.y.max(self.style.min_pane) } else { 0.0 } + self.style.tab_height;
-                    limits.max.x = limits.max.x.min(policy.max.x);
-                }
-                limits.min = limits.min.min(Vec2::splat(1_000_000.0));
-                limits.max = limits.max.max(limits.min);
-                limits
-            }
-            Node::Split { axis, first, second, .. } => {
-                let a = self.node_limits(first);
-                let b = self.node_limits(second);
-                let limits = match axis {
-                    SplitAxis::Horizontal => PanelLimits {
-                        min: vec2(a.min.x + b.min.x + self.style.gap, a.min.y.max(b.min.y)),
-                        max: vec2(a.max.x + b.max.x + self.style.gap, a.max.y.min(b.max.y)),
-                    },
-                    SplitAxis::Vertical => PanelLimits {
-                        min: vec2(a.min.x.max(b.min.x), a.min.y + b.min.y + self.style.gap),
-                        max: vec2(a.max.x.min(b.max.x), a.max.y + b.max.y + self.style.gap),
-                    },
-                };
-                PanelLimits { min: limits.min.min(Vec2::splat(1_000_000.0)), max: limits.max.max(limits.min).min(Vec2::splat(1_000_000.0)) }
-            }
-        }
+        node_limits(node, self.style, &self.permissions, &self.limits)
     }
 
     fn contents(&mut self, ui: &mut Ui, panel: &P, rect: Rect) {
@@ -546,6 +531,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
 
     fn group(&mut self, ui: &mut Ui, panels: &[P], active: usize, rect: Rect, floating: bool) {
         let Some(selected) = panels.get(active) else { return };
+        self.content.group_rect(ui.ctx(), panels, rect);
         let policy = (self.permissions)(selected);
         let bare = panels.len() == 1 && policy == Permissions::PROTECTED;
         if bare {
@@ -641,12 +627,14 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 });
             });
         }
-        // Include hidden tab identities for source-group detection without creating hit areas.
-        for panel in panels {
-            if !targets.iter().any(|(p, _)| p == panel) {
-                targets.push((panel.clone(), Rect::NOTHING));
-            }
-        }
+        // Retain logical order even when overflow hides a tab; hidden identities have no hit area.
+        let targets = panels
+            .iter()
+            .map(|panel| {
+                let rect = targets.iter().find(|(p, _)| p == panel).map(|(_, rect)| *rect).unwrap_or(Rect::NOTHING);
+                (panel.clone(), rect)
+            })
+            .collect();
         self.targets.push(DropTarget {
             anchor: selected.clone(),
             rect,
@@ -804,6 +792,30 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         }
     }
 
+    fn host_drop(&mut self, ctx: &Context, panel: &P, pointer: Pos2, whole_group: bool, released: bool, floating_rect: Option<Rect>) -> bool {
+        let request = DropRequest {
+            panel,
+            pointer,
+            targets: &self.targets,
+            floating_rect,
+            whole_group,
+            released,
+            workspace: self.workspace,
+            screen: ctx.content_rect(),
+        };
+        let Some(feedback) = self.content.resolve_drag(ctx, self.style, &request) else { return false };
+        if !released {
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, self.id.with("drop-preview")));
+            if let Some(rect) = feedback.preview.filter(|rect| super::targets::usable(*rect)) {
+                painter.rect(rect, 0.0, self.style.accent.gamma_multiply(0.15), Stroke::new(2.0, self.style.accent), StrokeKind::Inside);
+            }
+            if let Some(rect) = feedback.insertion.filter(|rect| super::targets::usable(*rect)) {
+                painter.rect_filled(rect, 0.0, self.style.accent);
+            }
+        }
+        true
+    }
+
     fn finish_group_drag(&mut self, ctx: &Context) {
         let Some(drag) = ctx.data(|d| d.get_temp::<GroupDrag<P>>(self.id.with("group-drag"))) else { return };
         if !self.layout.floating.iter().any(|g| g.panels.contains(&drag.panel) && g.panels.iter().all(|p| (self.permissions)(p).movable)) {
@@ -812,6 +824,18 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         }
         let (escape, focused, down, released, pointer) =
             ctx.input(|i| (i.key_pressed(Key::Escape), i.focused, i.pointer.primary_down(), i.pointer.primary_released(), i.pointer.interact_pos()));
+        if !escape
+            && focused
+            && (down || released)
+            && let Some(pointer) = pointer.filter(|p| p.is_finite())
+            && !self.blockers.iter().any(|r| r.contains(pointer))
+            && self.host_drop(ctx, &drag.panel, pointer, true, released, None)
+        {
+            if released {
+                ctx.data_mut(|d| d.remove::<GroupDrag<P>>(self.id.with("group-drag")));
+            }
+            return;
+        }
         if escape || !focused || !down {
             ctx.data_mut(|d| d.remove::<GroupDrag<P>>(self.id.with("group-drag")));
             if escape || !focused {
@@ -848,7 +872,22 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             }
             return;
         }
+        let floating_rect = ((self.permissions)(&drag.panel).floatable
+            && (!drag.source.contains(pointer) || self.layout.floating.iter().any(|g| g.panels.contains(&drag.panel))))
+        .then(|| clamp_float(Rect::from_min_size(pointer - drag.grab, drag.source.size()), ctx.content_rect()));
+        if self.host_drop(ctx, &drag.panel, pointer, false, released, floating_rect) {
+            if released {
+                cancel_drag::<P>(ctx, self.id);
+            }
+            return;
+        }
         let proposal = resolve_drop(&drag.panel, pointer, &self.targets);
+        if proposal.as_ref().is_some_and(|proposal| proposal.noop) {
+            if released {
+                cancel_drag::<P>(ctx, self.id);
+            }
+            return;
+        }
         if released {
             cancel_drag::<P>(ctx, self.id);
             if pointer.distance(drag.origin) < 2.0 {
@@ -914,4 +953,139 @@ fn split_bounds(available: f32, axis: SplitAxis, first: PanelLimits, second: Pan
     let constrained_lo = lo.max(available - b_max);
     let constrained_hi = hi.min(a_max);
     if constrained_lo <= constrained_hi { (constrained_lo, constrained_hi) } else { (lo, hi) }
+}
+
+fn node_limits<P>(
+    node: &Node<P>,
+    style: &DockStyle,
+    permissions: &impl Fn(&P) -> Permissions,
+    limits_fn: &impl Fn(&P) -> PanelLimits,
+) -> PanelLimits {
+    match node {
+        Node::Tabs { panels, .. } => {
+            let mut limits = PanelLimits::default();
+            for panel in panels {
+                let policy = (limits_fn)(panel);
+                limits.min = limits.min.max(policy.min).max(Vec2::splat(style.min_pane));
+                limits.max = limits.max.min(policy.max);
+            }
+            limits.max = limits.max.max(limits.min);
+            if panels.len() != 1 || panels.first().is_some_and(|p| (permissions)(p) != Permissions::PROTECTED) {
+                limits.min.y = (limits.min.y + style.tab_height).min(1_000_000.0);
+                limits.max.y = (limits.max.y + style.tab_height).min(1_000_000.0);
+            }
+            limits
+        }
+        Node::Stack { entries } => {
+            let mut limits = PanelLimits::default();
+            for entry in entries {
+                let policy = (limits_fn)(&entry.panel);
+                limits.min.x = limits.min.x.max(policy.min.x).max(style.min_pane);
+                limits.min.y += if entry.open { policy.min.y.max(style.min_pane) } else { 0.0 } + style.tab_height;
+                limits.max.x = limits.max.x.min(policy.max.x);
+            }
+            limits.min = limits.min.min(Vec2::splat(1_000_000.0));
+            limits.max = limits.max.max(limits.min);
+            limits
+        }
+        Node::Split { axis, first, second, .. } => {
+            let a = node_limits(first, style, permissions, limits_fn);
+            let b = node_limits(second, style, permissions, limits_fn);
+            let limits = match axis {
+                SplitAxis::Horizontal => PanelLimits {
+                    min: vec2(a.min.x + b.min.x + style.gap, a.min.y.max(b.min.y)),
+                    max: vec2(a.max.x + b.max.x + style.gap, a.max.y.min(b.max.y)),
+                },
+                SplitAxis::Vertical => PanelLimits {
+                    min: vec2(a.min.x.max(b.min.x), a.min.y + b.min.y + style.gap),
+                    max: vec2(a.max.x.min(b.max.x), a.max.y + b.max.y + style.gap),
+                },
+            };
+            PanelLimits { min: limits.min.min(Vec2::splat(1_000_000.0)), max: limits.max.max(limits.min).min(Vec2::splat(1_000_000.0)) }
+        }
+    }
+}
+
+/// Measure full group rectangles with exactly the constraints used by DockArea. Validates
+/// the tree first, bounding recursion and rejecting hostile geometry before traversing it.
+pub fn measure_layout<P: Clone + Eq + Hash>(
+    layout: &Layout<P>,
+    workspace: Rect,
+    screen: Rect,
+    style: &DockStyle,
+    permissions: impl Fn(&P) -> Permissions,
+    limits: impl Fn(&P) -> PanelLimits,
+) -> Result<Vec<(P, Rect)>, DockError> {
+    layout.validate()?;
+    if !style.valid() || !super::targets::usable(workspace) || !super::targets::usable(screen) || layout.panels().iter().any(|p| !limits(p).valid()) {
+        return Err(DockError::InvalidGeometry);
+    }
+    let mut output = Vec::new();
+    if let Some(root) = &layout.root {
+        measure_node(root, workspace, style, &permissions, &limits, &mut output);
+    }
+    for group in &layout.floating {
+        let policy = node_limits(&Node::Tabs { panels: group.panels.clone(), active: group.active }, style, &permissions, &limits);
+        let [x, y, w, h] = group.rect;
+        let rect = clamp_float(Rect::from_min_size(pos2(x, y), vec2(w, h).max(policy.min).min(policy.max)), screen);
+        output.extend(group.panels.iter().cloned().map(|p| (p, rect)));
+    }
+    Ok(output)
+}
+
+fn measure_node<P: Clone>(
+    node: &Node<P>,
+    rect: Rect,
+    style: &DockStyle,
+    permissions: &impl Fn(&P) -> Permissions,
+    limits: &impl Fn(&P) -> PanelLimits,
+    output: &mut Vec<(P, Rect)>,
+) {
+    match node {
+        Node::Split { axis, size, first, second } => {
+            let Some((split, _, _)) = constrained_split(
+                rect,
+                *axis,
+                *size,
+                style.gap,
+                node_limits(first, style, permissions, limits),
+                node_limits(second, style, permissions, limits),
+            ) else {
+                return;
+            };
+            measure_node(first, split.first, style, permissions, limits, output);
+            measure_node(second, split.second, style, permissions, limits, output);
+        }
+        Node::Tabs { panels, .. } => output.extend(panels.iter().cloned().map(|p| (p, rect))),
+        Node::Stack { entries } => {
+            let header = style.tab_height.min(rect.height() / entries.len().max(1) as f32);
+            let remaining = (rect.height() - (entries.len() as f32 * style.tab_height).min(rect.height())).max(0.0);
+            let total: f64 = entries.iter().filter(|e| e.open).map(|e| f64::from(e.height.unwrap_or(style.min_pane).max(1.0))).sum();
+            let mut top = rect.top();
+            for entry in entries {
+                let share = if entry.open && total > 0.0 {
+                    (f64::from(remaining) * f64::from(entry.height.unwrap_or(style.min_pane).max(1.0)) / total) as f32
+                } else {
+                    0.0
+                };
+                let pane = Rect::from_min_max(pos2(rect.left(), top), pos2(rect.right(), (top + header + share).min(rect.bottom())));
+                output.push((entry.panel.clone(), pane));
+                top = pane.bottom();
+            }
+        }
+    }
+}
+
+fn constrained_split(
+    rect: Rect,
+    axis: SplitAxis,
+    size: SplitSize,
+    gap: f32,
+    first: PanelLimits,
+    second: PanelLimits,
+) -> Option<(crate::layout::SplitLayout, f32, f32)> {
+    let wanted = split_rect(rect, axis, size, gap, 0.0)?;
+    let (lo, hi) = split_bounds(wanted.available(), axis, first, second);
+    let split = split_rect(rect, axis, SplitSize::FixedFirst(wanted.first_size().clamp(lo, hi)), gap, 0.0)?;
+    Some((split, lo, hi))
 }

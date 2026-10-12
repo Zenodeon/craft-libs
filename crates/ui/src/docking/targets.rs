@@ -20,6 +20,8 @@ pub struct DropProposal<P> {
     pub placement: Placement<P>,
     pub preview: Rect,
     pub insertion: Option<Rect>,
+    /// The pointer addresses the tab's current insertion slot.
+    pub noop: bool,
 }
 
 pub(super) fn usable(rect: Rect) -> bool {
@@ -68,6 +70,15 @@ pub fn resolve_drop<P: Clone + Eq>(panel: &P, pointer: Pos2, targets: &[DropTarg
     if target.tabs.len() > super::MAX_PANELS {
         return None;
     }
+    if &target.anchor == panel && target.tabs.iter().all(|(p, _)| p == panel) && target.tab_strip.is_some_and(|strip| strip.contains(pointer)) {
+        return Some(DropProposal {
+            anchor: panel.clone(),
+            placement: Placement::Tab { before: Some(panel.clone()) },
+            preview: target.rect,
+            insertion: None,
+            noop: true,
+        });
+    }
     let anchor = if &target.anchor == panel { target.tabs.iter().find(|(p, _)| p != panel).map(|(p, _)| p)? } else { &target.anchor };
     let strip = target.tab_strip.filter(|r| usable(*r) && r.contains(pointer));
     if let Some(strip) = strip {
@@ -80,11 +91,24 @@ pub fn resolve_drop<P: Clone + Eq>(panel: &P, pointer: Pos2, targets: &[DropTarg
             target.tabs.iter().filter(|(_, r)| usable(*r)).map(|(_, r)| r.right()).fold(strip.left(), f32::max).min(strip.right())
         });
         let insertion = Rect::from_min_max(pos2((x - 1.0).max(strip.left()), strip.top()), pos2((x + 1.0).min(strip.right()), strip.bottom()));
+        let old_order: Vec<_> = target.tabs.iter().map(|(p, _)| p).collect();
+        let mut order = old_order.clone();
+        let noop = if before_panel.as_ref() == Some(panel) {
+            old_order.contains(&panel)
+        } else if old_order.contains(&panel) {
+            order.retain(|p| *p != panel);
+            let at = before_panel.as_ref().and_then(|before| order.iter().position(|p| *p == before)).unwrap_or(order.len());
+            order.insert(at, panel);
+            order == old_order
+        } else {
+            false
+        };
         return Some(DropProposal {
             anchor: anchor.clone(),
             placement: Placement::Tab { before: before_panel },
             preview: target.rect,
-            insertion: Some(insertion),
+            insertion: (!noop).then_some(insertion),
+            noop,
         });
     }
     let zone = if target.allow_splits { drop_zone(target.rect, 0.0, pointer)? } else { Zone::Center };
@@ -95,5 +119,11 @@ pub fn resolve_drop<P: Clone + Eq>(panel: &P, pointer: Pos2, targets: &[DropTarg
     } else if !target.allow_splits {
         return None;
     }
-    Some(DropProposal { anchor: anchor.clone(), placement: Placement::Split(zone), preview: zone_rect(target.rect, zone)?, insertion: None })
+    Some(DropProposal {
+        anchor: anchor.clone(),
+        placement: Placement::Split(zone),
+        preview: zone_rect(target.rect, zone)?,
+        insertion: None,
+        noop: false,
+    })
 }
