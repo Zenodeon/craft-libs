@@ -143,6 +143,11 @@ pub fn begin_drag<P: Clone + Send + Sync + 'static>(ctx: &Context, area_id: Id, 
     true
 }
 
+/// Whether this area's authoritative tab/group gesture is active, independent of its display layout.
+pub fn is_dragging<P: Clone + Send + Sync + 'static>(ctx: &Context, area_id: Id) -> bool {
+    ctx.data(|data| data.get_temp::<Drag<P>>(area_id.with("drag")).is_some() || data.get_temp::<GroupDrag<P>>(area_id.with("group-drag")).is_some())
+}
+
 /// Discard pending tab/group gestures and an actively dragged renderer-owned control before
 /// replacing a workspace. Body/custom-header/menu gestures and other areas are untouched.
 /// Ownership is recorded as controls render; before an initial render or drag threshold there

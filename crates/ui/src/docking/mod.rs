@@ -10,7 +10,7 @@ mod surface;
 mod targets;
 
 pub use model::{Action, DockError, Floating, Layout, Location, MAX_DEPTH, MAX_PANELS, Node, Permissions, Placement, StackEntry, Zone};
-pub use surface::{DockArea, DockContent, DockOutput, DockStyle, DropFeedback, DropRequest, PanelLimits, begin_drag, cancel_drag, measure_layout};
+pub use surface::{DockArea, DockContent, DockOutput, DockStyle, DropFeedback, DropRequest, PanelLimits, begin_drag, cancel_drag, is_dragging, measure_layout};
 pub use targets::{DropProposal, DropTarget, drop_zone, resolve_drop, tab_insertion_marker, zone_rect};
 
 #[cfg(test)]
