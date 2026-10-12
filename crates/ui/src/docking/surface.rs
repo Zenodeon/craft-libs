@@ -976,6 +976,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             ctx,
             |ui| {
                 ui.set_min_size(rect.size());
+                ui.visuals_mut().disabled_alpha = 1.0;
                 ui.disable();
                 ui.set_clip_rect(rect);
                 ui.painter().rect_filled(rect, 0.0, self.style.background);
