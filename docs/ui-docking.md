@@ -157,3 +157,17 @@ hosts do not need to reconstruct them.
 `measure_layout` returns full group rectangles using the same split constraints, headers, protected-canvas rules and floating clamps as rendering. `DockContent::group_rect` reports actual rendered bounds for host inspection and regression checks. Tab proposals expose `noop`; same-group tab-strip destinations show only an insertion marker, including unchanged slots. Markers stay inside the visible strip and group bounds; unchanged releases emit no move/float.
 
 Floating groups move from their grip, empty header space or top border. Individual tabs retain their own drag behavior. Left, right and bottom edges and both bottom corners resize the group, respecting panel limits and viewport bounds; the top border remains a move target. Workspace permissions apply to movement and resizing.
+
+## Transient UI dragging across host surfaces
+
+Hosts can opt into `DockContent::live_drag`: the renderer leaves source bodies blank and
+renders the moving content once, disabled, above the workspace. `drag_members` identifies
+whole-group gestures started by custom headers. `floating_size` supplies independent
+preferred dimensions for both drag tear-off and the shared float menu. `drop_targets`
+publishes measured targets for applications coordinating several surfaces; use
+`DockArea::surface(id)` for separate divider identities while retaining the common drag ID.
+Only one surface should return true from `render_drag_ui`. Cross-surface transactions must
+commit after every surface renders the source snapshot, avoiding duplicate widget IDs on
+different egui layers within a frame. Live floating movement is transient until host release;
+cancellation does not write clamped geometry back. The floating top-border move target keeps
+the default cursor, while grips and resize handles retain their usual feedback.

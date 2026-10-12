@@ -316,6 +316,8 @@ fn frame(ctx: &Context, layout: &Layout<u32>, events: Vec<Event>, focused: bool)
                 ui.label("Actual panel content");
             },
         );
+        let cursor = ctx.output(|o| o.cursor_icon);
+        ctx.data_mut(|d| d.insert_temp(Id::new("test-cursor"), cursor));
     })
     .textures_delta
     .clear();
@@ -1275,6 +1277,9 @@ fn floating_border_and_empty_header_move_and_cancel_as_a_group() {
         step(&ctx, &mut layout, vec![Event::PointerMoved(from), pointer_button(from, true)]);
         step(&ctx, &mut layout, vec![Event::PointerMoved(from + vec2(50.0, 40.0))]);
         assert!((layout.floating[0].rect[0] - original[0] - 50.0).abs() < 1.0);
+        if name == "move-group-border" {
+            assert_eq!(ctx.data(|d| d.get_temp::<egui::CursorIcon>(Id::new("test-cursor"))), Some(egui::CursorIcon::Default));
+        }
         step(
             &ctx,
             &mut layout,

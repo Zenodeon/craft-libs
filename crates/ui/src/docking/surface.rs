@@ -117,6 +117,7 @@ struct Drag<P> {
 
 #[derive(Clone)]
 struct GroupDrag<P> {
+    keep_cursor: bool,
     origin: Pos2,
     panel: P,
     original: [f32; 4],
@@ -579,6 +580,11 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             return;
         }
         let response = ui.interact(hit, id, Sense::drag());
+        let response = if id == self.id.with(("move-group-border", panels.first())) {
+            response.on_hover_cursor(egui::CursorIcon::Default)
+        } else {
+            response.on_hover_cursor(egui::CursorIcon::Grab)
+        };
         self.register_interaction(ui.ctx(), response.id);
         response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &self.style.move_label));
         if panels.iter().all(|p| (self.permissions)(p).movable)
@@ -589,7 +595,12 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             ui.ctx().data_mut(|d| {
                 d.insert_temp(
                     self.id.with("group-drag"),
-                    GroupDrag { panel: first.clone(), original: [rect.left(), rect.top(), rect.width(), rect.height()], origin },
+                    GroupDrag {
+                        keep_cursor: id == self.id.with(("move-group-border", panels.first())),
+                        panel: first.clone(),
+                        original: [rect.left(), rect.top(), rect.width(), rect.height()],
+                        origin,
+                    },
                 )
             });
         }
@@ -759,6 +770,9 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         if policy.movable && response.drag_started() {
             begin_drag(ui.ctx(), self.id, panel.clone(), group);
         }
+        if self.content.live_drag() && ui.ctx().data(|d| d.get_temp::<Drag<P>>(self.id.with("drag"))).is_some_and(|d| &d.panel == panel) {
+            ui.painter().with_clip_rect(rect.intersect(ui.clip_rect())).rect_filled(rect, 0.0, self.style.tab_background);
+        }
         response.context_menu(|ui| {
             self.content.panel_menu(ui, panel);
             if policy.movable && policy.floatable {
@@ -766,7 +780,8 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 let response = ui.button(text);
                 response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &self.style.float_label));
                 if response.clicked() {
-                    let rect = clamp_float(group.translate(vec2(24.0, 24.0)), ui.ctx().content_rect());
+                    let size = self.content.floating_size(panel).filter(|s| s.is_finite() && s.x > 0.0 && s.y > 0.0).unwrap_or(group.size());
+                    let rect = clamp_float(Rect::from_min_size(group.min + vec2(24.0, 24.0), size), ui.ctx().content_rect());
                     self.output.actions.push(Action::Float { panel: panel.clone(), rect: [rect.left(), rect.top(), rect.width(), rect.height()] });
                     ui.close();
                 }
@@ -1019,6 +1034,9 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             }
             return;
         }
+        if drag.keep_cursor {
+            ctx.set_cursor_icon(egui::CursorIcon::Default);
+        }
         let (escape, focused, down, released, pointer) =
             ctx.input(|i| (i.key_pressed(Key::Escape), i.focused, i.pointer.primary_down(), i.pointer.primary_released(), i.pointer.interact_pos()));
         if !escape
@@ -1046,7 +1064,9 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         if escape || !focused || !down {
             ctx.data_mut(|d| d.remove::<GroupDrag<P>>(self.id.with("group-drag")));
             if escape || !focused {
-                self.output.actions.push(Action::MoveFloating { panel: drag.panel, rect: drag.original });
+                if !self.content.live_drag() {
+                    self.output.actions.push(Action::MoveFloating { panel: drag.panel, rect: drag.original });
+                }
             } else if released
                 && let Some(pointer) = pointer.filter(|p| p.is_finite())
                 && !self.blockers.iter().any(|r| r.contains(pointer))
