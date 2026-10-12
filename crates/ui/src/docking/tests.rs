@@ -696,7 +696,7 @@ impl DockContent<u32> for CustomContent {
     fn group_header(&mut self, ui: &mut egui::Ui, _: &[u32], _: &u32, _: bool) {
         self.headers += 1;
         assert!(ui.max_rect().width() <= 40.0);
-        ui.label("ÃƒÂ¢Ã¢â‚¬Â¹Ã‚Â®");
+        ui.label("⋮");
     }
 }
 
@@ -1308,4 +1308,29 @@ fn floating_border_movement_does_not_accumulate_fractional_step_rounding() {
     }
     assert!((layout.floating[0].rect[0] - original[0] - 80.0).abs() <= 1.0);
     assert!((layout.floating[0].rect[1] - original[1] - 60.0).abs() <= 1.0);
+}
+
+#[test]
+fn overflowing_strip_paints_a_single_ellipsis_symbol() {
+    use egui_kittest::Harness;
+    fn paints(shape: &egui::Shape, text: &str) -> bool {
+        match shape {
+            egui::Shape::Text(shape) => shape.galley.text() == text,
+            egui::Shape::Vec(shapes) => shapes.iter().any(|shape| paints(shape, text)),
+            _ => false,
+        }
+    }
+    let layout = Layout { root: Some(tabs(&[1, 2, 3, 4, 5, 6], 0)), floating: vec![] };
+    let mut h = Harness::builder().with_size(vec2(150.0, 240.0)).build_ui(move |ui| {
+        DockArea::new(Id::new("overflow-symbol")).show(
+            ui,
+            &layout,
+            &DockStyle::from_ui(ui),
+            |panel| format!("Panel {panel}"),
+            |_| Permissions::default(),
+            |_ui: &mut egui::Ui, _panel: &u32| {},
+        );
+    });
+    h.run_steps(2);
+    assert!(h.output().shapes.iter().any(|shape| paints(&shape.shape, "\u{2026}")));
 }
