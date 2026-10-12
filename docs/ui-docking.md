@@ -176,3 +176,8 @@ the default cursor, while grips and resize handles retain their usual feedback.
 and measured targets as destination resolution. It defaults to opaque; finite values clamp
 to 0..=1 and non-finite values fall back to opaque. Insertion and destination feedback retain
 their own opacity. The moving UI remains disabled at every opacity.
+
+`DockContent::drag_opacity_duration` optionally smooths moving-UI opacity changes over the
+returned duration in seconds (default zero). The transition starts at the current opacity,
+requests repaint while active, and is cleared on drag completion or cancellation. Destination
+feedback remains independent of this animation.

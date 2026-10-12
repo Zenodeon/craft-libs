@@ -116,6 +116,14 @@ struct Drag<P> {
 }
 
 #[derive(Clone)]
+struct DragOpacity {
+    from: f32,
+    target: f32,
+    started: f64,
+    current: f32,
+}
+
+#[derive(Clone)]
 struct GroupDrag<P> {
     keep_cursor: bool,
     origin: Pos2,
@@ -143,6 +151,7 @@ pub fn begin_drag<P: Clone + Send + Sync + 'static>(ctx: &Context, area_id: Id, 
 pub fn cancel_drag<P: Clone + Send + Sync + 'static>(ctx: &Context, area_id: Id) {
     let dragged = ctx.dragged_id();
     let owned = ctx.data_mut(|d| {
+        d.remove::<DragOpacity>(area_id.with("drag-opacity"));
         d.remove::<Drag<P>>(area_id.with("drag"));
         d.remove::<GroupDrag<P>>(area_id.with("group-drag"));
         let ids = d.remove_temp::<Vec<Id>>(area_id.with("owned-interactions"));
@@ -203,6 +212,10 @@ pub trait DockContent<P> {
     /// Non-finite values fall back to opaque and finite values are clamped to 0..=1.
     fn drag_opacity(&self, _ctx: &Context, _request: &DropRequest<'_, P>) -> f32 {
         1.0
+    }
+    /// Transition duration in seconds for moving-UI opacity. Zero preserves immediate changes.
+    fn drag_opacity_duration(&self) -> f32 {
+        0.0
     }
     /// Preferred floating size, independent of the current dock geometry.
     fn floating_size(&self, _panel: &P) -> Option<Vec2> {
@@ -945,10 +958,11 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
     }
 
     fn drag_ui(&mut self, ctx: &Context) {
-        if !self.content.live_drag()
-            || !self.content.render_drag_ui()
-            || ctx.input(|i| !i.focused || i.key_pressed(Key::Escape) || !i.pointer.primary_down())
-        {
+        if !self.content.render_drag_ui() {
+            return;
+        }
+        if !self.content.live_drag() || ctx.input(|i| !i.focused || i.key_pressed(Key::Escape) || !i.pointer.primary_down()) {
+            ctx.data_mut(|d| d.remove::<DragOpacity>(self.id.with("drag-opacity")));
             return;
         }
         let Some(pointer) = ctx.pointer_interact_pos() else {
@@ -977,6 +991,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 true,
             )
         } else {
+            ctx.data_mut(|d| d.remove::<DragOpacity>(self.id.with("drag-opacity")));
             return;
         };
         let opacity = self.content.drag_opacity(
@@ -993,6 +1008,32 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             },
         );
         let opacity = if opacity.is_finite() { opacity.clamp(0.0, 1.0) } else { 1.0 };
+        let duration = self.content.drag_opacity_duration();
+        let now = ctx.input(|i| i.time);
+        let opacity = if duration.is_finite() && duration > 0.0 {
+            let (current, repaint) = ctx.data_mut(|d| {
+                let key = self.id.with("drag-opacity");
+                let mut state = d.get_temp::<DragOpacity>(key).unwrap_or(DragOpacity { from: 1.0, target: 1.0, started: now, current: 1.0 });
+                let progress = ((now - state.started) / f64::from(duration)).clamp(0.0, 1.0) as f32;
+                let eased = progress * progress * (3.0 - 2.0 * progress);
+                state.current = state.from + (state.target - state.from) * eased;
+                if state.target != opacity {
+                    state.from = state.current;
+                    state.target = opacity;
+                    state.started = now;
+                }
+                let repaint = state.current != state.target;
+                let current = state.current;
+                d.insert_temp(key, state);
+                (current, repaint)
+            });
+            if repaint {
+                ctx.request_repaint();
+            }
+            current
+        } else {
+            opacity
+        };
         egui::Area::new(self.id.with("drag-ui"))
             .fade_in(false)
             .order(egui::Order::Foreground)
