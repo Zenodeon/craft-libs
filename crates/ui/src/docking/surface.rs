@@ -699,7 +699,8 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         let Some(selected) = panels.get(active) else { return };
         self.content.group_rect(ui.ctx(), panels, rect);
         let moving = self.moving_panels(ui.ctx());
-        let whole = (self.previewing || moving.len() > 1) && !moving.is_empty() && panels.iter().all(|panel| moving.contains(panel));
+        let group_drag = ui.ctx().data(|d| d.get_temp::<GroupDrag<P>>(self.id.with("group-drag"))).is_some();
+        let whole = (self.previewing || group_drag || moving.len() > 1) && !moving.is_empty() && panels.iter().all(|panel| moving.contains(panel));
         if whole {
             ui.painter().rect_filled(rect, 0.0, self.style.background);
             return;
