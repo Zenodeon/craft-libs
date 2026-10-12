@@ -195,6 +195,19 @@ feedback to follow the visible strip via `tab_insertion_marker` without changing
 `paint_preview` paints additional host feedback after the moving UI, independently of its opacity.
 A host must discard candidates on cancellation and commit only through resolve_drag on release.
 
+`preview_geometry_duration` opts into smooth, display-only group bounds (seconds, default zero).
+Bounds are measured with `measure_layout`, keyed by panel identity and interpolated with
+smoothstep easing. Retargeting starts from the current interpolation without resetting an
+unchanged target each frame. Joined tabs share the receiver's transition; new reserved slots
+remain at their measured destination. Return and post-release transitions finish independently
+of the gesture, with controls disabled and authoritative targets retained until settling.
+Normal resize actions remain immediate. `preview_geometry` reports animated group bounds and
+their destination for attached feedback; `preview_targets` reports the animated tab strips.
+Hosts may seed previously external content bounds through `preview_geometry_origin` and
+invalidate history on workspace replacement through `preview_geometry_generation`.
+`geometry_transition_active` lets a host retain its temporary shell while returning to its
+original layout. Animation state is transient and requests repaint only while bounds move.
+
 Floating areas paint their complete background beneath the tab strip and disable automatic Area
 appearance fading. Transparent theme tab-strip colors therefore reveal the panel background,
 not the canvas. The host's intentional moving-UI opacity continues to apply during dragging.

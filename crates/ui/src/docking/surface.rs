@@ -207,6 +207,22 @@ pub trait DockContent<P> {
     /// Paint host-owned display feedback after the moving UI, independently of its opacity.
     fn paint_preview(&mut self, _ctx: &Context) {}
 
+    /// Display-only docking geometry transition in seconds. Zero keeps instant sizing.
+    fn preview_geometry_duration(&self) -> f32 {
+        0.0
+    }
+    /// Change this when replacing the workspace to discard unrelated transition history.
+    fn preview_geometry_generation(&self) -> u64 {
+        0
+    }
+    /// Optional starting bounds for a panel newly appearing on this surface, e.g. a host's
+    /// previously separate document area. Existing transition history takes precedence.
+    fn preview_geometry_origin(&self, _ctx: &Context, _panel: &P) -> Option<Rect> {
+        None
+    }
+    /// Animated group bounds and their measured destination, including return/settling frames.
+    fn preview_geometry(&mut self, _ctx: &Context, _panels: &[P], _display: Rect, _destination: Rect) {}
+
     fn label(&mut self, _ui: &Ui, _panel: &P, logical: &str, _font: &FontId, _color: Color32) -> egui::WidgetText {
         logical.into()
     }
@@ -412,6 +428,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<P> {
             output: DockOutput::default(),
             workspace: rect,
             previewing: false,
+            geometry: None,
         };
         let targets_key = self.surface.with("authoritative-targets");
         let cached = ui.ctx().data(|d| d.get_temp::<Vec<DropTarget<P>>>(targets_key)).unwrap_or_default();
@@ -420,13 +437,32 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<P> {
             .filter(|layout| layout.validate().is_ok() && layout.panels().into_iter().all(|panel| limits(panel).valid()));
         let display = preview.as_ref().unwrap_or(layout);
         renderer.previewing = preview.is_some();
+        let duration = renderer.content.preview_geometry_duration();
+        if duration.is_finite() && duration > 0.0 {
+            let measured = measure_layout(display, rect, ui.ctx().content_rect(), style, &permissions, &limits).unwrap_or_default();
+            let moving = renderer.moving_panels(ui.ctx());
+            let origins: Vec<_> = measured.iter().filter_map(|(panel, _)| {
+                renderer.content.preview_geometry_origin(ui.ctx(), panel)
+                    .filter(|rect| super::targets::usable(*rect)).map(|rect| (panel.clone(), rect))
+            }).collect();
+            renderer.geometry = Some(super::geometry::Geometry::prepare(
+                ui.ctx(), self.surface, super::geometry::Options { generation: renderer.content.preview_geometry_generation(), duration },
+                preview.is_some(), &measured, &moving, &origins,
+            ));
+        } else {
+            ui.ctx().data_mut(|data| data.remove::<super::geometry::Geometry<P>>(self.surface.with("preview-geometry")));
+        }
+        let presenting = preview.is_some() || renderer.geometry.as_ref().is_some_and(|state| state.active);
         let dragging = renderer.content.live_drag() && ui.ctx().data(|d| {
             d.get_temp::<Drag<P>>(self.id.with("drag")).is_some() || d.get_temp::<GroupDrag<P>>(self.id.with("group-drag")).is_some()
         });
         renderer.targets.clear();
+        if presenting {
+            ui.painter().rect_filled(rect, 0.0, style.background);
+        }
         if let Some(root) = &display.root {
             ui.scope(|ui| {
-                if preview.is_some() {
+                if presenting {
                     ui.visuals_mut().disabled_alpha = 1.0;
                     ui.disable();
                 }
@@ -434,19 +470,19 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<P> {
             });
             ui.allocate_rect(rect, Sense::hover());
         }
-        renderer.floating(ui.ctx(), display, preview.is_some());
+        renderer.floating(ui.ctx(), display, presenting);
         if preview.is_some() {
             renderer.content.preview_targets(ui.ctx(), &renderer.targets);
         }
-        if dragging && !cached.is_empty() {
+        if (dragging || presenting) && !cached.is_empty() {
             renderer.targets = cached;
-        } else if preview.is_none() {
+        } else if !presenting {
             ui.ctx().data_mut(|d| d.insert_temp(targets_key, renderer.targets.clone()));
         }
         renderer.content.drop_targets(ui.ctx(), &renderer.targets);
         renderer.drag_ui(ui.ctx());
         renderer.content.paint_preview(ui.ctx());
-        if preview.is_some() {
+        if presenting {
             renderer.output.actions.clear();
             renderer.output.focused = None;
         }
@@ -460,6 +496,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<P> {
 struct Renderer<'a, P> {
     workspace: Rect,
     previewing: bool,
+    geometry: Option<super::geometry::Geometry<P>>,
     id: Id,
     surface: Id,
     style: &'a DockStyle,
@@ -476,6 +513,14 @@ struct Renderer<'a, P> {
 }
 
 impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
+    fn presentation_rect(&mut self, ctx: &Context, panels: &[P], destination: Rect) -> Rect {
+        let display = self.geometry.as_ref().map(|state| state.rect(panels, destination)).unwrap_or(destination);
+        if display != destination {
+            self.content.preview_geometry(ctx, panels, display, destination);
+        }
+        display
+    }
+
     fn register_interaction(&mut self, ctx: &Context, id: Id) {
         // A validated tree has at most 2*MAX_PANELS nodes. Tabs, stack dividers,
         // floating grips/corners and splits fit comfortably inside this fixed bound.
@@ -509,6 +554,9 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 path.push(true);
                 self.node(ui, second, split.second, path);
                 path.pop();
+                if self.geometry.as_ref().is_some_and(|state| state.active) {
+                    return;
+                }
                 // The divider's inner-edge hit margin must win over child scrollbars, just
                 // as accordion dividers win over the adjacent panel's content.
                 let response = ResizeHandle::new(
@@ -542,7 +590,10 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                         0.0
                     };
                     let panel_rect = Rect::from_min_max(pos2(rect.left(), top), pos2(rect.right(), (top + header + share).min(rect.bottom())));
-                    let title_rect = Rect::from_min_max(panel_rect.min, pos2(panel_rect.right(), (top + header).min(panel_rect.bottom())));
+                    let next_top = panel_rect.bottom();
+                    let panel_rect = self.presentation_rect(ui.ctx(), std::slice::from_ref(&entry.panel), panel_rect);
+                    self.content.group_rect(ui.ctx(), std::slice::from_ref(&entry.panel), panel_rect);
+                    let title_rect = Rect::from_min_max(panel_rect.min, pos2(panel_rect.right(), (panel_rect.top() + header).min(panel_rect.bottom())));
                     self.tab(ui, &entry.panel, title_rect, entry.open, panel_rect);
                     let collapse = Rect::from_min_max(pos2((title_rect.right() - 18.0).max(title_rect.left()), title_rect.top()), title_rect.max);
                     let response = ui.interact(collapse, self.id.with(("collapse", &entry.panel)), Sense::click());
@@ -559,7 +610,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                     if response.clicked() {
                         self.output.actions.push(Action::SetStackOpen { panel: entry.panel.clone(), open: !entry.open });
                     }
-                    let body_rect = Rect::from_min_max(pos2(rect.left(), title_rect.bottom()), panel_rect.max);
+                    let body_rect = Rect::from_min_max(pos2(panel_rect.left(), title_rect.bottom()), panel_rect.max);
                     if entry.open {
                         self.contents(ui, &entry.panel, body_rect);
                     }
@@ -571,13 +622,16 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                         allow_splits: true,
                         accepts_tabs: (self.permissions)(&entry.panel).accepts_tabs,
                     });
-                    top = panel_rect.bottom();
+                    top = next_top;
                     if entry.open && remaining > 0.0 {
                         dividers.push((index, Rect::from_min_max(pos2(rect.left(), top - 1.0), pos2(rect.right(), top + 1.0)).intersect(rect)));
                     }
                 }
                 // Register dividers after the headers so their narrow hit regions win at the
                 // shared boundary. Closed entries retain their saved sizes and are skipped.
+                if self.geometry.as_ref().is_some_and(|state| state.active) {
+                    return;
+                }
                 for (index, divider) in dividers {
                     let Some(first) = entries.get(index) else { continue };
                     let Some(second) = entries.iter().skip(index.saturating_add(1)).find(|entry| entry.open) else { continue };
@@ -702,12 +756,15 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
 
     fn group(&mut self, ui: &mut Ui, panels: &[P], active: usize, rect: Rect, floating: bool) {
         let Some(selected) = panels.get(active) else { return };
+        let rect = if floating { rect } else { self.presentation_rect(ui.ctx(), panels, rect) };
         self.content.group_rect(ui.ctx(), panels, rect);
         let moving = self.moving_panels(ui.ctx());
         let group_drag = ui.ctx().data(|d| d.get_temp::<GroupDrag<P>>(self.id.with("group-drag"))).is_some();
         let whole = (self.previewing || group_drag || moving.len() > 1) && !moving.is_empty() && panels.iter().all(|panel| moving.contains(panel));
         if whole {
-            ui.painter().rect_filled(rect, 0.0, self.style.background);
+            if !self.geometry.as_ref().is_some_and(|state| state.active) {
+                ui.painter().rect_filled(rect, 0.0, self.style.background);
+            }
             return;
         }
 
@@ -907,6 +964,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             let limits = self.node_limits(&Node::Tabs { panels: group.panels.clone(), active: group.active });
             let size = vec2(width, height).max(limits.min).min(limits.max);
             let rect = clamp_float(Rect::from_min_size(pos2(x, y), size), screen);
+            let rect = clamp_float(self.presentation_rect(ctx, &group.panels, rect), screen);
             let id = self.id.with(("floating", first));
             if self.activation.as_ref().is_some_and(|panel| group.panels.contains(panel)) {
                 ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, id));
