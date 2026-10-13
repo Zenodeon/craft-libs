@@ -162,12 +162,17 @@ pub fn cancel_drag<P: Clone + Send + Sync + 'static>(ctx: &Context, area_id: Id)
         d.remove::<Drag<P>>(area_id.with("drag"));
         d.remove::<GroupDrag<P>>(area_id.with("group-drag"));
         let ids = d.remove_temp::<Vec<Id>>(area_id.with("owned-interactions"));
+        let resize = d.get_temp::<Id>(area_id.with("pointer-resize"));
+        d.remove::<Id>(area_id.with("pointer-resize"));
+        if let Some(id) = resize {
+            d.remove::<super::AnchoredResize>(id.with("pointer-anchor"));
+        }
         if let Some(ids) = &ids {
             for id in ids {
                 d.remove::<super::AnchoredResize>(id.with("pointer-anchor"));
             }
         }
-        dragged.is_some_and(|id| ids.is_some_and(|ids| ids.contains(&id)))
+        dragged.is_some_and(|id| resize == Some(id) || ids.is_some_and(|ids| ids.contains(&id)))
     });
     if owned {
         ctx.stop_dragging();
@@ -1179,7 +1184,13 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                         if let Some(origin) = ui.input(|i| i.pointer.press_origin())
                             && let Some(anchor) = super::AnchoredResize::new(rect, origin, direction)
                         {
-                            ui.ctx().data_mut(|data| data.insert_temp(anchor_id, anchor));
+                            ui.ctx().data_mut(|data| {
+                                if let Some(previous) = data.get_temp::<Id>(self.id.with("pointer-resize")) {
+                                    data.remove::<super::AnchoredResize>(previous.with("pointer-anchor"));
+                                }
+                                data.insert_temp(self.id.with("pointer-resize"), response.id);
+                                data.insert_temp(anchor_id, anchor);
+                            });
                         }
                     }
                     let cancelled = ui.input(|input| input.key_pressed(Key::Escape) || !input.focused);
@@ -1231,7 +1242,12 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                         response.surrender_focus();
                     }
                     if cancelled || !permitted || !ui.input(|input| input.pointer.primary_down()) {
-                        ui.ctx().data_mut(|data| data.remove::<super::AnchoredResize>(anchor_id));
+                        ui.ctx().data_mut(|data| {
+                            data.remove::<super::AnchoredResize>(anchor_id);
+                            if data.get_temp::<Id>(self.id.with("pointer-resize")) == Some(response.id) {
+                                data.remove::<Id>(self.id.with("pointer-resize"));
+                            }
+                        });
                     }
                     if name == "resize" && (response.hovered() || response.dragged() || response.has_focus()) {
                         ui.painter().line_segment([corner.left_bottom(), corner.right_top()], Stroke::new(2.0, self.style.accent));

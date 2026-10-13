@@ -377,6 +377,27 @@ fn pointer_button(pos: egui::Pos2, pressed: bool) -> Event {
 }
 
 #[test]
+fn resize_cancellation_retains_ownership_across_other_host_rendering() {
+    let ctx = Context::default();
+    let area = Id::new("test-area");
+    let mut layout = sample();
+    for _ in 0..3 {
+        step(&ctx, &mut layout, vec![]);
+    }
+    let id = area.with(("floating", &5u32)).with("resize-right");
+    let start = ctx.read_response(id).unwrap().rect.center();
+    step(&ctx, &mut layout, vec![Event::PointerMoved(start), pointer_button(start, true)]);
+    step(&ctx, &mut layout, vec![Event::PointerMoved(start + vec2(20.0, 0.0))]);
+    assert_eq!(ctx.dragged_id(), Some(id));
+    ctx.data_mut(|data| data.insert_temp(area.with("owned-interactions"), vec![Id::new("another-host-control")]));
+    cancel_drag::<u32>(&ctx, area);
+    assert!(ctx.dragged_id().is_none());
+    let before = layout.clone();
+    assert!(step(&ctx, &mut layout, vec![Event::PointerMoved(start + vec2(100.0, 0.0))]).is_empty());
+    assert_eq!(layout, before);
+}
+
+#[test]
 fn collapsed_floating_height_cap_does_not_disable_keyboard_width_resizing() {
     let ctx = Context::default();
     let mut layout = Layout { root: None, floating: vec![Floating { panels: vec![1u32], active: 0, rect: [80.0, 70.0, 300.0, 26.0] }] };
