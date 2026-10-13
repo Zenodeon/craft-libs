@@ -129,6 +129,8 @@ struct GroupDrag<P> {
     origin: Pos2,
     panel: P,
     original: [f32; 4],
+    members: Vec<P>,
+    selected: P,
 }
 
 /// Start a docking drag from an application's existing tab/header. Use the same area ID when
@@ -160,6 +162,11 @@ pub fn cancel_drag<P: Clone + Send + Sync + 'static>(ctx: &Context, area_id: Id)
         d.remove::<Drag<P>>(area_id.with("drag"));
         d.remove::<GroupDrag<P>>(area_id.with("group-drag"));
         let ids = d.remove_temp::<Vec<Id>>(area_id.with("owned-interactions"));
+        if let Some(ids) = &ids {
+            for id in ids {
+                d.remove::<super::AnchoredResize>(id.with("pointer-anchor"));
+            }
+        }
         dragged.is_some_and(|id| ids.is_some_and(|ids| ids.contains(&id)))
     });
     if owned {
@@ -266,6 +273,10 @@ pub trait DockContent<P> {
     fn drop_targets(&mut self, _ctx: &Context, _targets: &[DropTarget<P>]) {}
     fn group_rect(&mut self, _ctx: &Context, _panels: &[P], _rect: Rect) {}
     fn panel_menu(&mut self, _ui: &mut Ui, _panel: &P) {}
+    /// Opt into docked empty-header/top-border whole-group gestures. Hosts consume group drops.
+    fn drag_docked_headers(&self) -> bool {
+        false
+    }
     fn group_header_width(&self, _panels: &[P], _active: &P, _floating: bool) -> f32 {
         0.0
     }
@@ -720,11 +731,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             return self.content.drag_members(ctx, &drag.panel).unwrap_or_else(|| vec![drag.panel]);
         }
         if let Some(drag) = ctx.data(|d| d.get_temp::<GroupDrag<P>>(self.id.with("group-drag"))) {
-            return self
-                .content
-                .drag_members(ctx, &drag.panel)
-                .or_else(|| self.layout.floating.iter().find(|g| g.panels.contains(&drag.panel)).map(|g| g.panels.clone()))
-                .unwrap_or_default();
+            return self.content.drag_members(ctx, &drag.panel).or_else(|| Some(drag.members)).unwrap_or_default();
         }
         Vec::new()
     }
@@ -747,7 +754,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         }
     }
 
-    fn move_floating_group(&mut self, ui: &mut Ui, panels: &[P], rect: Rect, hit: Rect, id: Id) {
+    fn move_floating_group(&mut self, ui: &mut Ui, panels: &[P], selected: &P, rect: Rect, hit: Rect, id: Id) {
         if !super::targets::usable(hit) {
             return;
         }
@@ -764,6 +771,13 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             && let Some(first) = panels.first()
         {
             let origin = ui.input(|input| input.pointer.press_origin()).unwrap_or(hit.center());
+            let rect = if self.layout.floating.iter().any(|group| group.panels.contains(first)) {
+                rect
+            } else {
+                let size = self.content.floating_size(selected).filter(|s| s.is_finite() && s.x > 0.0 && s.y > 0.0).unwrap_or(rect.size());
+                let grab = (origin - rect.min).clamp(Vec2::ZERO, vec2(size.x, self.style.tab_height.min(size.y)));
+                Rect::from_min_size(origin - grab, size)
+            };
             ui.ctx().data_mut(|d| {
                 d.insert_temp(
                     self.id.with("group-drag"),
@@ -772,6 +786,8 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                         panel: first.clone(),
                         original: [rect.left(), rect.top(), rect.width(), rect.height()],
                         origin,
+                        members: panels.to_vec(),
+                        selected: selected.clone(),
                     },
                 )
             });
@@ -864,7 +880,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         ui.painter().rect_filled(strip, 0.0, self.style.tab_background);
         if floating && job.frozen.is_none() {
             let grip = Rect::from_min_max(strip.min, pos2((strip.left() + 12.0).min(strip.right()), strip.bottom()));
-            self.move_floating_group(ui, panels, rect, grip, self.id.with(("move-group", panels.first())));
+            self.move_floating_group(ui, panels, selected, rect, grip, self.id.with(("move-group", panels.first())));
             ui.painter().line_segment([grip.center() - vec2(0.0, 5.0), grip.center() + vec2(0.0, 5.0)], self.style.border);
             strip.min.x = grip.right();
         }
@@ -944,11 +960,14 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         if !overflow_indices.is_empty() {
             x += overflow_width;
         }
-        if floating {
+        if floating || (self.content.drag_docked_headers() && job.frozen.is_none()) {
             let blank = Rect::from_min_max(pos2(x, strip.top()), pos2((strip.right() - header_width).max(x), strip.bottom()));
-            self.move_floating_group(ui, panels, rect, blank, self.id.with(("move-group-header", panels.first())));
-            let border = Rect::from_min_max(rect.min, pos2(rect.right(), (rect.top() + 4.0).min(strip.bottom())));
-            self.move_floating_group(ui, panels, rect, border, self.id.with(("move-group-border", panels.first())));
+            self.move_floating_group(ui, panels, selected, rect, blank, self.id.with(("move-group-header", panels.first())));
+            let border = Rect::from_min_max(
+                strip.min,
+                pos2((strip.right() - header_width - overflow_width).max(strip.left()), (strip.top() + 4.0).min(strip.bottom())),
+            );
+            self.move_floating_group(ui, panels, selected, rect, border, self.id.with(("move-group-border", panels.first())));
         }
         // Retain logical order even when overflow hides a tab; hidden identities have no hit area.
         let targets = panels
@@ -1154,13 +1173,17 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                     let response = ui.interact(corner, id.with(name), Sense::drag()).on_hover_cursor(cursor);
                     self.register_interaction(ui.ctx(), response.id);
                     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &self.style.resize_window_label));
+                    let anchor_id = response.id.with("pointer-anchor");
                     if response.drag_started() {
                         response.request_focus();
+                        if let Some(origin) = ui.input(|i| i.pointer.press_origin())
+                            && let Some(anchor) = super::AnchoredResize::new(rect, origin, direction)
+                        {
+                            ui.ctx().data_mut(|data| data.insert_temp(anchor_id, anchor));
+                        }
                     }
-                    if response.drag_stopped() {
-                        response.surrender_focus();
-                    }
-                    let mut delta = if response.dragged() { ui.input(|i| i.pointer.delta()) } else { Vec2::ZERO };
+                    let cancelled = ui.input(|input| input.key_pressed(Key::Escape) || !input.focused);
+                    let mut delta = Vec2::ZERO;
                     if response.has_focus() {
                         ui.memory_mut(|memory| {
                             memory.set_focus_lock_filter(
@@ -1183,24 +1206,32 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                             }
                         });
                     }
-                    if response.enabled()
-                        && group.panels.iter().all(|panel| (self.permissions)(panel).movable)
-                        && delta != Vec2::ZERO
-                        && !ui.input(|input| input.key_pressed(Key::Escape) || !input.focused)
+                    let pointer_resize = response.dragged() || response.drag_stopped();
+                    let limits = PanelLimits { min: limits.min.max(vec2(40.0, self.style.tab_height + 20.0)), ..limits };
+                    let next = if pointer_resize {
+                        ui.ctx()
+                            .data(|data| data.get_temp::<super::AnchoredResize>(anchor_id))
+                            .and_then(|anchor| ui.ctx().pointer_interact_pos().and_then(|pointer| anchor.rect(pointer, screen, limits)))
+                    } else if delta != Vec2::ZERO {
+                        super::AnchoredResize::new(rect, rect.max, direction).and_then(|anchor| anchor.rect(rect.max + delta, screen, limits))
+                    } else {
+                        None
+                    };
+                    let permitted = response.enabled() && group.panels.iter().all(|panel| (self.permissions)(panel).movable);
+                    if permitted
+                        && !cancelled
+                        && let Some(resized) = next.filter(|next| *next != rect)
                     {
-                        let size = (rect.size() + delta * direction)
-                            .max(limits.min.max(vec2(40.0, self.style.tab_height + 20.0)))
-                            .min(limits.max)
-                            .min(screen.size());
-                        let min = pos2(
-                            if direction.x < 0.0 { rect.right() - size.x } else { rect.left() },
-                            if direction.y < 0.0 { rect.bottom() - size.y } else { rect.top() },
-                        );
-                        let resized = clamp_float(Rect::from_min_size(min, size), screen);
                         self.output.actions.push(Action::MoveFloating {
                             panel: first.clone(),
                             rect: [resized.left(), resized.top(), resized.width(), resized.height()],
                         });
+                    }
+                    if response.drag_stopped() {
+                        response.surrender_focus();
+                    }
+                    if cancelled || !permitted || !ui.input(|input| input.pointer.primary_down()) {
+                        ui.ctx().data_mut(|data| data.remove::<super::AnchoredResize>(anchor_id));
                     }
                     if name == "resize" && (response.hovered() || response.dragged() || response.has_focus()) {
                         ui.painter().line_segment([corner.left_bottom(), corner.right_top()], Stroke::new(2.0, self.style.accent));
@@ -1271,13 +1302,10 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 false,
             )
         } else if let Some(drag) = group {
-            let Some(g) = self.layout.floating.iter().find(|g| g.panels.contains(&drag.panel)) else {
-                return;
-            };
             let [x, y, w, h] = drag.original;
             (
-                g.panels.clone(),
-                g.panels.get(g.active).unwrap_or(&drag.panel).clone(),
+                drag.members.clone(),
+                drag.selected.clone(),
                 clamp_float(Rect::from_min_size(pos2(x, y), vec2(w, h)).translate(pointer - drag.origin), ctx.content_rect()),
                 true,
             )
@@ -1388,7 +1416,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
 
     fn finish_group_drag(&mut self, ctx: &Context) {
         let Some(drag) = ctx.data(|d| d.get_temp::<GroupDrag<P>>(self.id.with("group-drag"))) else { return };
-        if !self.layout.floating.iter().any(|g| g.panels.contains(&drag.panel) && g.panels.iter().all(|p| (self.permissions)(p).movable)) {
+        if !drag.members.iter().all(|panel| self.layout.contains(panel) && (self.permissions)(panel).movable) {
             if !self.content.live_drag() {
                 ctx.data_mut(|d| d.remove::<GroupDrag<P>>(self.id.with("group-drag")));
             }

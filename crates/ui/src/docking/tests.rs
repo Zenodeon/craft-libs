@@ -225,7 +225,7 @@ fn pointer_targets_distinguish_reorder_center_split_and_occlusion() {
     assert!(placement.insertion.unwrap().is_finite());
     assert_eq!(resolve_drop(&5, rect.center(), std::slice::from_ref(&group)).unwrap().placement, Placement::Split(Zone::Center));
     assert_eq!(resolve_drop(&5, pos2(11.0, 90.0), std::slice::from_ref(&group)).unwrap().placement, Placement::Split(Zone::Left));
-    assert!(resolve_drop(&3, rect.center(), std::slice::from_ref(&group)).is_none());
+    assert!(resolve_drop(&3, rect.center(), std::slice::from_ref(&group)).unwrap().noop);
     assert!(resolve_drop(&3, pos2(11.0, 90.0), std::slice::from_ref(&group)).is_some());
     let mut overlay = target(5, &[5], rect);
     overlay.accepts_tabs = false;
@@ -374,6 +374,129 @@ fn step(ctx: &Context, layout: &mut Layout<u32>, events: Vec<Event>) -> Vec<Acti
 
 fn pointer_button(pos: egui::Pos2, pressed: bool) -> Event {
     Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE }
+}
+
+#[test]
+fn returning_to_a_singleton_or_floating_source_body_is_an_explicit_noop() {
+    for panels in [vec![1u32], vec![1, 2, 3]] {
+        for allow_splits in [false, true] {
+            let rect = Rect::from_min_size(Pos2::ZERO, vec2(300.0, 300.0));
+            let target = DropTarget {
+                anchor: 1,
+                rect,
+                tab_strip: Some(Rect::from_min_size(Pos2::ZERO, vec2(300.0, 26.0))),
+                tabs: panels.iter().map(|id| (*id, Rect::NOTHING)).collect(),
+                allow_splits,
+                accepts_tabs: true,
+            };
+            let proposal = resolve_drop(&1, rect.center(), &[target]).unwrap();
+            assert!(proposal.noop);
+            assert!(proposal.insertion.is_none());
+        }
+    }
+}
+
+#[test]
+fn pointer_floating_resize_stops_at_edges_and_waits_for_cursor_to_return() {
+    for name in ["resize-right", "resize-left", "resize-bottom", "resize", "resize-bottom-left"] {
+        let ctx = Context::default();
+        let mut layout = sample();
+        for _ in 0..3 {
+            step(&ctx, &mut layout, vec![]);
+        }
+        let id = Id::new("test-area").with(("floating", &5u32)).with(name);
+        let start = ctx.read_response(id).unwrap().rect.center();
+        let original = layout.floating[0].rect;
+        let horizontal = name != "resize-bottom";
+        let left = name.contains("left");
+        step(&ctx, &mut layout, vec![Event::PointerMoved(start), pointer_button(start, true)]);
+        let outside = if horizontal { pos2(if left { -200.0 } else { 1100.0 }, start.y) } else { pos2(start.x, 1000.0) };
+        step(&ctx, &mut layout, vec![Event::PointerMoved(outside)]);
+        let stopped = layout.floating[0].rect;
+        if horizontal {
+            if left {
+                assert_eq!(stopped[0] + stopped[2], original[0] + original[2]);
+            } else {
+                assert_eq!(stopped[0], original[0]);
+                assert_eq!(stopped[0] + stopped[2], 800.0);
+            }
+        } else {
+            assert_eq!(stopped[1], original[1]);
+            assert_eq!(stopped[1] + stopped[3], 600.0);
+        }
+        let still_outside = if horizontal { outside + vec2(if left { 100.0 } else { -100.0 }, 0.0) } else { outside - vec2(0.0, 100.0) };
+        step(&ctx, &mut layout, vec![Event::PointerMoved(still_outside)]);
+        assert_eq!(layout.floating[0].rect, stopped, "{name}: reversal outside the edge must not resize");
+        step(&ctx, &mut layout, vec![Event::PointerMoved(start)]);
+        assert_eq!(layout.floating[0].rect, original, "{name}: returning to the original handle restores its geometry");
+        step(&ctx, &mut layout, vec![pointer_button(start, false)]);
+        assert!(!ctx.memory(|memory| memory.has_focus(id)));
+    }
+}
+
+#[test]
+fn docked_header_drag_is_opt_in_and_preserves_selected_group_members() {
+    struct Content {
+        enabled: bool,
+        whole: bool,
+        bodies: Vec<u32>,
+    }
+    impl DockContent<u32> for Content {
+        fn body(&mut self, _: &mut egui::Ui, panel: &u32) {
+            self.bodies.push(*panel);
+        }
+        fn live_drag(&self) -> bool {
+            true
+        }
+        fn drag_docked_headers(&self) -> bool {
+            self.enabled
+        }
+        fn resolve_drag(&mut self, _: &Context, _: &DockStyle, request: &DropRequest<'_, u32>) -> Option<DropFeedback> {
+            self.whole |= request.whole_group;
+            Some(DropFeedback::default())
+        }
+    }
+    for enabled in [false, true] {
+        for handle in ["move-group-border", "move-group-header"] {
+            let ctx = Context::default();
+            let area = Id::new("docked-header");
+            let layout = Layout { root: Some(tabs(&[1, 2], 1)), floating: vec![] };
+            let mut content = Content { enabled, whole: false, bodies: vec![] };
+            let mut frame = |events| {
+                content.bodies.clear();
+                ctx.run_ui(
+                    RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), events, focused: true, ..Default::default() },
+                    |ui| {
+                        let out = DockArea::new(area).show_customized(
+                            ui,
+                            &layout,
+                            &DockStyle::from_ui(ui),
+                            |p| p.to_string(),
+                            |_| Permissions::default(),
+                            |_| PanelLimits::default(),
+                            &mut content,
+                        );
+                        assert!(out.actions.is_empty());
+                    },
+                )
+                .textures_delta
+                .clear();
+            };
+            for _ in 0..3 {
+                frame(vec![]);
+            }
+            let id = area.with((handle, Some(&1u32)));
+            if !enabled {
+                assert!(ctx.read_response(id).is_none());
+                continue;
+            }
+            let start = ctx.read_response(id).unwrap().rect.center();
+            frame(vec![Event::PointerMoved(start), pointer_button(start, true)]);
+            frame(vec![Event::PointerMoved(start + vec2(70.0, 80.0))]);
+            assert!(content.whole, "{handle}: start={start:?}, dragged={:?}", ctx.dragged_id());
+            assert_eq!(content.bodies, [2], "only the selected moving body renders, preserving selection");
+        }
+    }
 }
 
 #[test]
@@ -638,8 +761,9 @@ fn floating_group_grip_moves_every_member_while_tab_drag_detaches_one() {
     let tab = ctx.read_response(Id::new("test-area").with(("tab", &5u32))).unwrap().rect.center();
     step(&ctx, &mut layout, vec![Event::PointerMoved(tab), pointer_button(tab, true)]);
     step(&ctx, &mut layout, vec![Event::PointerMoved(tab + vec2(8.0, 0.0))]);
-    step(&ctx, &mut layout, vec![Event::PointerMoved(tab + vec2(100.0, 100.0))]);
-    let detached = step(&ctx, &mut layout, vec![pointer_button(tab + vec2(100.0, 100.0), false)]);
+    let outside = pos2(780.0, 650.0);
+    step(&ctx, &mut layout, vec![Event::PointerMoved(outside)]);
+    let detached = step(&ctx, &mut layout, vec![pointer_button(outside, false)]);
     assert!(detached.iter().any(|a| matches!(a, Action::Float { panel: 5, .. })));
     assert_eq!(layout.floating.len(), 2);
     assert_eq!(layout.floating[0].panels, vec![6]);

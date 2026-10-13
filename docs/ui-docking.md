@@ -154,7 +154,7 @@ hosts do not need to reconstruct them.
 
 `DockContent::resolve_drag` optionally owns a tab or floating-group gesture. Its `DropRequest` supplies visible targets, pointer/release state, viewport bounds and the default floating rectangle. Returning `Some(DropFeedback)` consumes the gesture, including explicit no-ops; the host stages/commits its validated transaction on release, and the shared renderer draws only the supplied preview and insertion marker. Returning `None` retains the default resolver.
 
-`measure_layout` returns full group rectangles using the same split constraints, headers, protected-canvas rules and floating clamps as rendering. `DockContent::group_rect` reports actual rendered bounds for host inspection and regression checks. Tab proposals expose `noop`; same-group tab-strip destinations show only an insertion marker, including unchanged slots. Markers stay inside the visible strip and group bounds; unchanged releases emit no move/float.
+`measure_layout` returns full group rectangles using the same split constraints, headers, protected-canvas rules and floating clamps as rendering. `DockContent::group_rect` reports actual rendered bounds for host inspection and regression checks. Tab proposals expose `noop`; same-group tab-strip destinations retain a bounded insertion marker, including unchanged slots. Markers stay inside the visible strip and group bounds; unchanged releases emit no move/float.
 
 Floating groups move from their grip, empty header space or top border. Individual tabs retain their own drag behavior. Left, right and bottom edges and both bottom corners resize the group, respecting panel limits and viewport bounds; the top border remains a move target. Workspace permissions apply to movement and resizing.
 
@@ -245,3 +245,22 @@ when painting, so fully opaque insertion lines stay above stationary header and 
 Pointer resizing releases divider/corner focus when its drag stops, so the focused accent
 highlight does not remain after release and pointer exit. Ordinary hover and drag feedback
 remain, and keyboard focus through traversal still supports arrow-key resizing.
+
+
+## Docked headers and anchored resizing
+
+Hosts opt into docked empty-header and top-4-point whole-group dragging with
+`DockContent::drag_docked_headers`. Group gestures retain every member and the selected
+panel, use host-owned atomic drop resolution, and keep the normal top-border pointer.
+Header menu and overflow controls keep their own hit areas. The default remains disabled.
+
+Source-center drops, including singleton and floating groups, resolve as explicit no-ops.
+PhotoCraft highlights the source content area while retaining a clear tab strip and its
+fully opaque insertion line; real reorder slots and unchanged slots share this feedback.
+
+`AnchoredResize` captures the displayed rectangle, fixed opposite edges and pointer grab
+offset. Pointer movement sets the dragged edges absolutely, bounded by panel limits and
+the viewport before constructing the rectangle. Overshoot never translates the opposite
+edge or creates immediate growth on reversal outside the valid range. Impossible minimums
+suspend resizing. Pointer anchors clear on release, focus loss, Escape and host cancellation;
+keyboard resizing continues in fixed steps. Hosts can reuse the helper for document windows.

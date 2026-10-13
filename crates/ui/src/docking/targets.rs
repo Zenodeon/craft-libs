@@ -121,10 +121,19 @@ pub fn resolve_drop<P: Clone + Eq>(panel: &P, pointer: Pos2, targets: &[DropTarg
             noop,
         });
     }
+    let zone = if target.allow_splits { drop_zone(target.rect, 0.0, pointer)? } else { Zone::Center };
+    if zone == Zone::Center && target.accepts_tabs && target.tabs.iter().any(|(p, _)| p == panel) {
+        return Some(DropProposal {
+            anchor: anchor.clone(),
+            placement: Placement::Tab { before: Some(panel.clone()) },
+            preview: target.rect,
+            insertion: None,
+            noop: true,
+        });
+    }
     if anchor == panel {
         return None;
     }
-    let zone = if target.allow_splits { drop_zone(target.rect, 0.0, pointer)? } else { Zone::Center };
     if zone == Zone::Center {
         if !target.accepts_tabs || target.tabs.iter().any(|(p, _)| p == panel) {
             return None;
