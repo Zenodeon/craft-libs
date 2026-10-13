@@ -28,7 +28,8 @@ pub(super) struct Options {
 
 impl<P: Clone + Eq + Send + Sync + 'static> Strips<P> {
     pub fn load(ctx: &Context, surface: Id, generation: u64) -> Self {
-        let mut state = ctx.data(|data| data.get_temp::<Self>(surface.with("preview-strips")))
+        let mut state = ctx
+            .data(|data| data.get_temp::<Self>(surface.with("preview-strips")))
             .filter(|state| state.generation == generation)
             .unwrap_or(Self { entries: Vec::new(), generation });
         for entry in &mut state.entries {
@@ -41,17 +42,11 @@ impl<P: Clone + Eq + Send + Sync + 'static> Strips<P> {
         !self.entries.is_empty()
     }
 
-    pub fn header(
-        &mut self,
-        ctx: &Context,
-        panels: &[P],
-        destination: Rect,
-        frozen: Option<DropTarget<P>>,
-        options: Options,
-    ) -> Option<Header<P>> {
+    pub fn header(&mut self, ctx: &Context, panels: &[P], destination: Rect, frozen: Option<DropTarget<P>>, options: Options) -> Option<Header<P>> {
         let Options { duration, dragging, returning } = options;
         if let Some(source) = frozen.filter(|target| {
-            target.tabs.len() <= super::MAX_PANELS && super::targets::usable(target.rect)
+            target.tabs.len() <= super::MAX_PANELS
+                && super::targets::usable(target.rect)
                 && target.tab_strip.is_some_and(super::targets::usable)
                 && panels.contains(&target.anchor)
         }) {

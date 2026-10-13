@@ -443,7 +443,8 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<P> {
         let targets_key = self.surface.with("authoritative-targets");
         let cached = ui.ctx().data(|d| d.get_temp::<Vec<DropTarget<P>>>(targets_key)).unwrap_or_default();
         renderer.targets = cached.clone();
-        let preview = renderer.prepare_preview(ui.ctx())
+        let preview = renderer
+            .prepare_preview(ui.ctx())
             .filter(|layout| layout.validate().is_ok() && layout.panels().into_iter().all(|panel| limits(panel).valid()));
         let display = preview.as_ref().unwrap_or(layout);
         renderer.previewing = preview.is_some();
@@ -451,22 +452,35 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<P> {
         if duration.is_finite() && duration > 0.0 {
             let measured = measure_layout(display, rect, ui.ctx().content_rect(), style, &permissions, &limits).unwrap_or_default();
             let moving = renderer.moving_panels(ui.ctx());
-            let origins: Vec<_> = measured.iter().filter_map(|(panel, _)| {
-                renderer.content.preview_geometry_origin(ui.ctx(), panel)
-                    .filter(|rect| super::targets::usable(*rect)).map(|rect| (panel.clone(), rect))
-            }).collect();
+            let origins: Vec<_> = measured
+                .iter()
+                .filter_map(|(panel, _)| {
+                    renderer
+                        .content
+                        .preview_geometry_origin(ui.ctx(), panel)
+                        .filter(|rect| super::targets::usable(*rect))
+                        .map(|rect| (panel.clone(), rect))
+                })
+                .collect();
             renderer.geometry = Some(super::geometry::Geometry::prepare(
-                ui.ctx(), self.surface, super::geometry::Options { generation: renderer.content.preview_geometry_generation(), duration },
-                preview.is_some(), &measured, &moving, &origins,
+                ui.ctx(),
+                self.surface,
+                super::geometry::Options { generation: renderer.content.preview_geometry_generation(), duration },
+                preview.is_some(),
+                &measured,
+                &moving,
+                &origins,
             ));
         } else {
             ui.ctx().data_mut(|data| data.remove::<super::geometry::Geometry<P>>(self.surface.with("preview-geometry")));
         }
-        let presenting = preview.is_some() || renderer.geometry.as_ref().is_some_and(|state| state.active)
+        let presenting = preview.is_some()
+            || renderer.geometry.as_ref().is_some_and(|state| state.active)
             || renderer.strips.as_ref().is_some_and(|state| state.active());
-        let dragging = renderer.content.live_drag() && ui.ctx().data(|d| {
-            d.get_temp::<Drag<P>>(self.id.with("drag")).is_some() || d.get_temp::<GroupDrag<P>>(self.id.with("group-drag")).is_some()
-        });
+        let dragging = renderer.content.live_drag()
+            && ui
+                .ctx()
+                .data(|d| d.get_temp::<Drag<P>>(self.id.with("drag")).is_some() || d.get_temp::<GroupDrag<P>>(self.id.with("group-drag")).is_some());
         renderer.targets.clear();
         if presenting {
             ui.painter().rect_filled(rect, 0.0, style.background);
@@ -618,7 +632,8 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                     let next_top = panel_rect.bottom();
                     let panel_rect = self.presentation_rect(ui.ctx(), std::slice::from_ref(&entry.panel), panel_rect);
                     self.content.group_rect(ui.ctx(), std::slice::from_ref(&entry.panel), panel_rect);
-                    let title_rect = Rect::from_min_max(panel_rect.min, pos2(panel_rect.right(), (panel_rect.top() + header).min(panel_rect.bottom())));
+                    let title_rect =
+                        Rect::from_min_max(panel_rect.min, pos2(panel_rect.right(), (panel_rect.top() + header).min(panel_rect.bottom())));
                     self.tab(ui, &entry.panel, title_rect, entry.open, panel_rect);
                     let collapse = Rect::from_min_max(pos2((title_rect.right() - 18.0).max(title_rect.left()), title_rect.top()), title_rect.max);
                     let response = ui.interact(collapse, self.id.with(("collapse", &entry.panel)), Sense::click());
@@ -705,7 +720,9 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             return self.content.drag_members(ctx, &drag.panel).unwrap_or_else(|| vec![drag.panel]);
         }
         if let Some(drag) = ctx.data(|d| d.get_temp::<GroupDrag<P>>(self.id.with("group-drag"))) {
-            return self.content.drag_members(ctx, &drag.panel)
+            return self
+                .content
+                .drag_members(ctx, &drag.panel)
                 .or_else(|| self.layout.floating.iter().find(|g| g.panels.contains(&drag.panel)).map(|g| g.panels.clone()))
                 .unwrap_or_default();
         }
@@ -815,9 +832,13 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         };
         let header = self.strips.as_mut().and_then(|state| state.header(ui.ctx(), panels, destination, frozen, options));
         if let Some(header) = header {
-            let header_panels = header.frozen.as_ref().map(|target| target.tabs.iter().map(|(panel, _)| panel.clone()).collect::<Vec<_>>())
+            let header_panels = header
+                .frozen
+                .as_ref()
+                .map(|target| target.tabs.iter().map(|(panel, _)| panel.clone()).collect::<Vec<_>>())
                 .unwrap_or_else(|| panels.to_vec());
-            let header_active = header.frozen.as_ref().and_then(|target| header_panels.iter().position(|panel| panel == &target.anchor)).unwrap_or(active);
+            let header_active =
+                header.frozen.as_ref().and_then(|target| header_panels.iter().position(|panel| panel == &target.anchor)).unwrap_or(active);
             self.headers.push(HeaderJob { panels: header_panels, active: header_active, rect: header.rect, floating, frozen: header.frozen });
         } else {
             self.header(ui, &HeaderJob { panels: panels.to_vec(), active, rect, floating, frozen: None });
@@ -834,7 +855,10 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         let floating = job.floating;
         let Some(selected) = panels.get(active) else { return };
         let policy = (self.permissions)(selected);
-        let mut strip = job.frozen.as_ref().and_then(|target| target.tab_strip)
+        let mut strip = job
+            .frozen
+            .as_ref()
+            .and_then(|target| target.tab_strip)
             .unwrap_or_else(|| Rect::from_min_max(rect.min, pos2(rect.right(), (rect.top() + self.style.tab_height).min(rect.bottom()))));
         ui.painter().rect_filled(strip, 0.0, self.style.background);
         ui.painter().rect_filled(strip, 0.0, self.style.tab_background);
@@ -864,20 +888,35 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             })
             .collect();
         let fit = tabs::fit(&widths, active, (strip.width() - header_width).max(0.0), 40.0, 22.0);
-        let shown = job.frozen.as_ref().map(|target| {
-            target.tabs.iter().enumerate().filter(|(_, (_, rect))| super::targets::usable(*rect))
-                .map(|(index, (_, rect))| (index, rect.width())).collect::<Vec<_>>()
-        }).unwrap_or_else(|| fit.shown.clone());
-        let overflow_indices = job.frozen.as_ref().map(|target| {
-            target.tabs.iter().enumerate().filter(|(_, (_, rect))| !super::targets::usable(*rect))
-                .map(|(index, _)| index).collect::<Vec<_>>()
-        }).unwrap_or_else(|| fit.overflow.clone());
+        let shown = job
+            .frozen
+            .as_ref()
+            .map(|target| {
+                target
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, rect))| super::targets::usable(*rect))
+                    .map(|(index, (_, rect))| (index, rect.width()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| fit.shown.clone());
+        let overflow_indices = job
+            .frozen
+            .as_ref()
+            .map(|target| {
+                target.tabs.iter().enumerate().filter(|(_, (_, rect))| !super::targets::usable(*rect)).map(|(index, _)| index).collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| fit.overflow.clone());
         let overflow_width = if job.frozen.is_some() { 22.0_f32.min((strip.width() - header_width).max(0.0)) } else { fit.overflow_width };
         let mut x = strip.left();
         let mut targets = Vec::new();
         for (index, width) in &shown {
             let Some(panel) = panels.get(*index) else { continue };
-            let tab = job.frozen.as_ref().and_then(|target| target.tabs.iter().find(|(member, _)| member == panel).map(|(_, rect)| *rect))
+            let tab = job
+                .frozen
+                .as_ref()
+                .and_then(|target| target.tabs.iter().find(|(member, _)| member == panel).map(|(_, rect)| *rect))
                 .unwrap_or_else(|| Rect::from_min_size(pos2(x, strip.top()), vec2(*width, strip.height())));
             self.tab(ui, panel, tab, *index == active, rect);
             targets.push((panel.clone(), tab));
@@ -933,12 +972,19 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         for job in std::mem::take(&mut self.headers) {
             let Some(anchor) = job.panels.first() else { continue };
             let id = self.surface.with(("preview-strip", anchor));
-            let strip = job.frozen.as_ref().and_then(|target| target.tab_strip)
-                .unwrap_or_else(|| Rect::from_min_max(job.rect.min, pos2(job.rect.right(), (job.rect.top() + self.style.tab_height).min(job.rect.bottom()))));
+            let strip = job.frozen.as_ref().and_then(|target| target.tab_strip).unwrap_or_else(|| {
+                Rect::from_min_max(job.rect.min, pos2(job.rect.right(), (job.rect.top() + self.style.tab_height).min(job.rect.bottom())))
+            });
             let layer = egui::LayerId::new(egui::Order::Foreground, id);
             ctx.move_to_top(layer);
-            egui::Area::new(id).fade_in(false).order(egui::Order::Foreground).fixed_pos(strip.min)
-                .movable(false).interactable(false).constrain(false).show(ctx, |ui| {
+            egui::Area::new(id)
+                .fade_in(false)
+                .order(egui::Order::Foreground)
+                .fixed_pos(strip.min)
+                .movable(false)
+                .interactable(false)
+                .constrain(false)
+                .show(ctx, |ui| {
                     ui.set_min_size(strip.size());
                     ui.set_clip_rect(strip.intersect(ctx.content_rect()));
                     ui.visuals_mut().disabled_alpha = 1.0;
@@ -1172,7 +1218,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 pointer.map(|pointer| {
                     let floating = ((self.permissions)(&drag.panel).floatable
                         && (!drag.source.contains(pointer) || self.layout.floating.iter().any(|g| g.panels.contains(&drag.panel))))
-                        .then(|| self.tab_float_rect(ctx, &drag, pointer));
+                    .then(|| self.tab_float_rect(ctx, &drag, pointer));
                     (drag.panel, pointer, floating, false)
                 })
             } else if let Some(drag) = ctx.data(|d| d.get_temp::<GroupDrag<P>>(self.id.with("group-drag"))) {
@@ -1187,16 +1233,18 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         } else {
             None
         };
-        let request = gesture.as_ref().filter(|(_, pointer, _, _)| !self.blockers.iter().any(|rect| rect.contains(*pointer))).map(|(panel, pointer, rect, whole)| DropRequest {
-            panel,
-            pointer: *pointer,
-            targets: &self.targets,
-            floating_rect: *rect,
-            whole_group: *whole,
-            released: false,
-            workspace: self.workspace,
-            screen: ctx.content_rect(),
-        });
+        let request = gesture.as_ref().filter(|(_, pointer, _, _)| !self.blockers.iter().any(|rect| rect.contains(*pointer))).map(
+            |(panel, pointer, rect, whole)| DropRequest {
+                panel,
+                pointer: *pointer,
+                targets: &self.targets,
+                floating_rect: *rect,
+                whole_group: *whole,
+                released: false,
+                workspace: self.workspace,
+                screen: ctx.content_rect(),
+            },
+        );
         self.content.preview_layout(ctx, self.style, request.as_ref())
     }
 
@@ -1589,8 +1637,12 @@ pub struct SplitBoundary<P> {
 }
 
 pub fn measure_layout_with_boundaries<P: Clone + Eq + Hash>(
-    layout: &Layout<P>, workspace: Rect, screen: Rect, style: &DockStyle,
-    permissions: impl Fn(&P) -> Permissions, limits: impl Fn(&P) -> PanelLimits,
+    layout: &Layout<P>,
+    workspace: Rect,
+    screen: Rect,
+    style: &DockStyle,
+    permissions: impl Fn(&P) -> Permissions,
+    limits: impl Fn(&P) -> PanelLimits,
 ) -> Result<LayoutMeasurement<P>, DockError> {
     layout.validate()?;
     if !style.valid() || !super::targets::usable(workspace) || !super::targets::usable(screen) || layout.panels().iter().any(|p| !limits(p).valid()) {
@@ -1636,7 +1688,11 @@ fn measure_node<P: Clone>(
             let b = output.len();
             measure_node(second, split.second, style, permissions, limits, output, boundaries);
             boundaries.push(SplitBoundary {
-                axis: *axis, rect, divider: split.divider, first_rect: split.first, second_rect: split.second,
+                axis: *axis,
+                rect,
+                divider: split.divider,
+                first_rect: split.first,
+                second_rect: split.second,
                 first: output.get(a..b).unwrap_or_default().iter().map(|(panel, _)| panel.clone()).collect(),
                 second: output.get(b..).unwrap_or_default().iter().map(|(panel, _)| panel.clone()).collect(),
             });

@@ -70,9 +70,12 @@ pub fn tab_insertion_marker<P: Eq>(target: &DropTarget<P>, before: Option<&P>) -
         return None;
     }
     let index = before.and_then(|before| target.tabs.iter().position(|(panel, _)| panel == before));
-    let x = index.and_then(|index| target.tabs.get(index..))
+    let x = index
+        .and_then(|index| target.tabs.get(index..))
         .and_then(|tabs| tabs.iter().find(|(_, rect)| usable(*rect)).map(|(_, rect)| rect.left()))
-        .unwrap_or_else(|| target.tabs.iter().filter(|(_, rect)| usable(*rect)).map(|(_, rect)| rect.right()).fold(strip.left(), f32::max).min(strip.right()));
+        .unwrap_or_else(|| {
+            target.tabs.iter().filter(|(_, rect)| usable(*rect)).map(|(_, rect)| rect.right()).fold(strip.left(), f32::max).min(strip.right())
+        });
     let width = strip.width().min(2.0);
     let left = (x - width * 0.5).max(strip.left()).min((strip.right() - width).max(strip.left()));
     Some(Rect::from_min_max(pos2(left, strip.top()), pos2((left + width).min(strip.right()), strip.bottom())))

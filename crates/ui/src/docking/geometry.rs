@@ -40,19 +40,10 @@ pub(super) struct Options {
 }
 
 impl<P: Clone + Eq + Send + Sync + 'static> Geometry<P> {
-    pub fn prepare(
-        ctx: &Context,
-        surface: Id,
-        options: Options,
-        preview: bool,
-        desired: &[(P, Rect)],
-        moving: &[P],
-        origins: &[(P, Rect)],
-    ) -> Self {
+    pub fn prepare(ctx: &Context, surface: Id, options: Options, preview: bool, desired: &[(P, Rect)], moving: &[P], origins: &[(P, Rect)]) -> Self {
         let Options { generation, duration } = options;
         let key = surface.with("preview-geometry");
-        let previous = ctx.data(|data| data.get_temp::<Self>(key))
-            .filter(|state| state.generation == generation);
+        let previous = ctx.data(|data| data.get_temp::<Self>(key)).filter(|state| state.generation == generation);
         let now = ctx.input(|input| input.time);
         let duration = if duration.is_finite() { duration.clamp(0.0, 10.0) } else { 0.0 };
         let animate = duration > 0.0 && (preview || previous.as_ref().is_some_and(|state| state.active));
@@ -63,10 +54,14 @@ impl<P: Clone + Eq + Send + Sync + 'static> Geometry<P> {
             }
             // Joined tabs share the receiver's motion, even if the incoming tab is first.
             let prior = previous.as_ref().and_then(|state| {
-                desired.iter().filter(|(member, rect)| rect == target && !moving.contains(member))
+                desired
+                    .iter()
+                    .filter(|(member, rect)| rect == target && !moving.contains(member))
                     .find_map(|(member, _)| state.entries.iter().find(|(known, _)| known == member).map(|(_, motion)| motion))
             });
-            let origin = desired.iter().filter(|(member, rect)| rect == target && !moving.contains(member))
+            let origin = desired
+                .iter()
+                .filter(|(member, rect)| rect == target && !moving.contains(member))
                 .find_map(|(member, _)| origins.iter().find(|(known, _)| known == member).map(|(_, rect)| *rect))
                 .unwrap_or(*target);
             let mut motion = prior.cloned().unwrap_or(Motion { from: origin, target: origin, current: origin, started: now });
@@ -93,8 +88,7 @@ impl<P: Clone + Eq + Send + Sync + 'static> Geometry<P> {
     }
 
     pub fn rect(&self, panels: &[P], fallback: Rect) -> Rect {
-        panels.iter().find_map(|panel| self.entries.iter().find(|(known, _)| known == panel).map(|(_, motion)| motion.current))
-            .unwrap_or(fallback)
+        panels.iter().find_map(|panel| self.entries.iter().find(|(known, _)| known == panel).map(|(_, motion)| motion.current)).unwrap_or(fallback)
     }
 }
 

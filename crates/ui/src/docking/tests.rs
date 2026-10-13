@@ -1412,18 +1412,32 @@ fn live_drag_renders_body_once_disabled_with_independent_float_size() {
 fn between_groups_shrinks_both_neighbors_in_both_orientations_and_preserves_group_selection() {
     for axis in [SplitAxis::Horizontal, SplitAxis::Vertical] {
         let ctx = Context::default();
-        ctx.run_ui(RawInput::default(), |ui| {
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
             let mut style = DockStyle::from_ui(ui);
             style.min_pane = 0.0;
             let bounds = Rect::from_min_size(Pos2::ZERO, vec2(900.0, 900.0));
             let mut layout = Layout {
-                root: Some(Node::Split { axis, size: SplitSize::FixedFirst(300.0), first: Box::new(tabs(&[1, 3], 0)), second: Box::new(tabs(&[2], 0)) }),
+                root: Some(Node::Split {
+                    axis,
+                    size: SplitSize::FixedFirst(300.0),
+                    first: Box::new(tabs(&[1, 3], 0)),
+                    second: Box::new(tabs(&[2], 0)),
+                }),
                 floating: vec![Floating { panels: vec![5, 6], active: 1, rect: [20.0, 20.0, 300.0, 400.0] }],
             };
             let old = measure_layout(&layout, bounds, bounds, &style, |_| Permissions::default(), |_| PanelLimits::default()).unwrap();
-            insert_between(&mut layout, BetweenRequest { members: &[5, 6], selected: &6, before: &1, after: &2 }, bounds, bounds, &style,
-                |_| Permissions::default(), |_| PanelLimits::default()).unwrap();
-            let measured = measure_layout_with_boundaries(&layout, bounds, bounds, &style, |_| Permissions::default(), |_| PanelLimits::default()).unwrap();
+            insert_between(
+                &mut layout,
+                BetweenRequest { members: &[5, 6], selected: &6, before: &1, after: &2 },
+                bounds,
+                bounds,
+                &style,
+                |_| Permissions::default(),
+                |_| PanelLimits::default(),
+            )
+            .unwrap();
+            let measured =
+                measure_layout_with_boundaries(&layout, bounds, bounds, &style, |_| Permissions::default(), |_| PanelLimits::default()).unwrap();
             let get = |panel| measured.panels.iter().find(|(id, _)| *id == panel).unwrap().1;
             let extent = |rect: Rect| if axis == SplitAxis::Horizontal { rect.width() } else { rect.height() };
             for panel in [1, 2] {
@@ -1438,25 +1452,57 @@ fn between_groups_shrinks_both_neighbors_in_both_orientations_and_preserves_grou
             assert!(layout.floating.is_empty());
             assert_eq!(layout.panels().len(), 5);
         });
+        output.textures_delta.clear();
     }
 }
 
 #[test]
 fn between_group_rejects_minimum_space_bad_neighbors_and_permissions_atomically() {
     let ctx = Context::default();
-    ctx.run_ui(RawInput::default(), |ui| {
+    let mut output = ctx.run_ui(RawInput::default(), |ui| {
         let style = DockStyle::from_ui(ui);
         let bounds = Rect::from_min_size(Pos2::ZERO, vec2(900.0, 900.0));
         let original = sample();
         let mut layout = original.clone();
-        assert!(insert_between(&mut layout, BetweenRequest { members: &[5], selected: &5, before: &1, after: &2 }, bounds, bounds, &style,
-            |_| Permissions::default(), |_| PanelLimits { min: vec2(400.0, 400.0), ..Default::default() }).is_err());
+        assert!(
+            insert_between(
+                &mut layout,
+                BetweenRequest { members: &[5], selected: &5, before: &1, after: &2 },
+                bounds,
+                bounds,
+                &style,
+                |_| Permissions::default(),
+                |_| PanelLimits { min: vec2(400.0, 400.0), ..Default::default() }
+            )
+            .is_err()
+        );
         assert_eq!(layout, original);
-        assert!(insert_between(&mut layout, BetweenRequest { members: &[5], selected: &5, before: &2, after: &1 }, bounds, bounds, &style,
-            |_| Permissions::default(), |_| PanelLimits::default()).is_err());
+        assert!(
+            insert_between(
+                &mut layout,
+                BetweenRequest { members: &[5], selected: &5, before: &2, after: &1 },
+                bounds,
+                bounds,
+                &style,
+                |_| Permissions::default(),
+                |_| PanelLimits::default()
+            )
+            .is_err()
+        );
         assert_eq!(layout, original);
-        assert!(insert_between(&mut layout, BetweenRequest { members: &[5], selected: &5, before: &1, after: &2 }, bounds, bounds, &style,
-            |_| Permissions::PROTECTED, |_| PanelLimits::default()).is_err());
+        assert!(
+            insert_between(
+                &mut layout,
+                BetweenRequest { members: &[5], selected: &5, before: &1, after: &2 },
+                bounds,
+                bounds,
+                &style,
+                |_| Permissions::PROTECTED,
+                |_| PanelLimits::default()
+            )
+            .is_err()
+        );
         assert_eq!(layout, original);
     });
+    output.textures_delta.clear();
 }

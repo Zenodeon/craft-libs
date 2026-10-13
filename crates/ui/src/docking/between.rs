@@ -17,19 +17,28 @@ pub struct BetweenRequest<'a, P> {
 /// Insert a tab/group between split children atomically. New space starts at one third;
 /// remaining space preserves the neighbors' measured proportion, subject to pane limits.
 pub fn insert_between<P: Clone + Eq + Hash>(
-    layout: &mut Layout<P>, request: BetweenRequest<'_, P>, workspace: Rect, screen: Rect,
-    style: &DockStyle, permissions: impl Fn(&P) -> Permissions, limits: impl Fn(&P) -> PanelLimits,
+    layout: &mut Layout<P>,
+    request: BetweenRequest<'_, P>,
+    workspace: Rect,
+    screen: Rect,
+    style: &DockStyle,
+    permissions: impl Fn(&P) -> Permissions,
+    limits: impl Fn(&P) -> PanelLimits,
 ) -> Result<(), DockError> {
     layout.validate()?;
-    if request.members.is_empty() || request.members.len() > super::MAX_PANELS
+    if request.members.is_empty()
+        || request.members.len() > super::MAX_PANELS
         || request.members.iter().collect::<HashSet<_>>().len() != request.members.len()
-        || !request.members.contains(request.selected) || request.before == request.after
-        || request.members.contains(request.before) || request.members.contains(request.after)
+        || !request.members.contains(request.selected)
+        || request.before == request.after
+        || request.members.contains(request.before)
+        || request.members.contains(request.after)
     {
         return Err(DockError::InvalidPlacement);
     }
     if request.members.iter().any(|panel| !permissions(panel).movable)
-        || !permissions(request.before).accepts_tabs || !permissions(request.after).accepts_tabs
+        || !permissions(request.before).accepts_tabs
+        || !permissions(request.after).accepts_tabs
     {
         return Err(DockError::NotAllowed);
     }
@@ -39,12 +48,20 @@ pub fn insert_between<P: Clone + Eq + Hash>(
         proposed.take_for_transfer(panel)?;
     }
     let measured = measure_layout_with_boundaries(&proposed, workspace, screen, style, &permissions, &limits)?;
-    let boundary = measured.boundaries.iter().find(|boundary| boundary.first.contains(request.before) && boundary.second.contains(request.after))
+    let boundary = measured
+        .boundaries
+        .iter()
+        .find(|boundary| boundary.first.contains(request.before) && boundary.second.contains(request.after))
         .ok_or(DockError::MissingTarget)?;
     let active = request.members.iter().position(|panel| panel == request.selected).ok_or(DockError::InvalidSelection)?;
     let incoming = Node::Tabs { panels: request.members.to_vec(), active };
     let root = proposed.root.as_mut().ok_or(DockError::MissingTarget)?;
-    insert_with_policy(root, request.before, request.after, &Policy { incoming: &incoming, boundary, style, permissions: &permissions, limits: &limits })?;
+    insert_with_policy(
+        root,
+        request.before,
+        request.after,
+        &Policy { incoming: &incoming, boundary, style, permissions: &permissions, limits: &limits },
+    )?;
     proposed.validate()?;
     *layout = proposed;
     Ok(())
@@ -67,11 +84,16 @@ struct Policy<'a, P, F, L> {
 }
 
 fn insert_with_policy<P: Clone + Eq, F: Fn(&P) -> Permissions, L: Fn(&P) -> PanelLimits>(
-    node: &mut Node<P>, before: &P, after: &P, policy: &Policy<'_, P, F, L>,
+    node: &mut Node<P>,
+    before: &P,
+    after: &P,
+    policy: &Policy<'_, P, F, L>,
 ) -> Result<(), DockError> {
     let Node::Split { axis, first, second, .. } = node else { return Err(DockError::MissingTarget) };
     if contains(first, before) && contains(second, after) {
-        if *axis != policy.boundary.axis { return Err(DockError::InvalidPlacement); }
+        if *axis != policy.boundary.axis {
+            return Err(DockError::InvalidPlacement);
+        }
         let a = super::surface::node_limits(first, policy.style, policy.permissions, policy.limits);
         let b = super::surface::node_limits(second, policy.style, policy.permissions, policy.limits);
         let n = super::surface::node_limits(policy.incoming, policy.style, policy.permissions, policy.limits);
@@ -97,9 +119,14 @@ fn insert_with_policy<P: Clone + Eq, F: Fn(&P) -> Permissions, L: Fn(&P) -> Pane
         }
         let a_extent = (remaining * old_a / (old_a + old_b)).clamp(low, high);
         let replacement = Node::Split {
-            axis: *axis, size: SplitSize::FixedFirst(a_extent), first: first.clone(),
+            axis: *axis,
+            size: SplitSize::FixedFirst(a_extent),
+            first: first.clone(),
             second: Box::new(Node::Split {
-                axis: *axis, size: SplitSize::FixedFirst(new_extent), first: Box::new(policy.incoming.clone()), second: second.clone(),
+                axis: *axis,
+                size: SplitSize::FixedFirst(new_extent),
+                first: Box::new(policy.incoming.clone()),
+                second: second.clone(),
             }),
         };
         *node = replacement;
