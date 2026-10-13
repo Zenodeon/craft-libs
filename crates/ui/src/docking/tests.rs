@@ -377,6 +377,45 @@ fn pointer_button(pos: egui::Pos2, pressed: bool) -> Event {
 }
 
 #[test]
+fn collapsed_floating_height_cap_does_not_disable_keyboard_width_resizing() {
+    let ctx = Context::default();
+    let mut layout = Layout { root: None, floating: vec![Floating { panels: vec![1u32], active: 0, rect: [80.0, 70.0, 300.0, 26.0] }] };
+    let id = Id::new("collapsed-resize").with(("floating", &1u32)).with("resize-right");
+    let mut frame = |events| {
+        let mut actions = Vec::new();
+        ctx.run_ui(
+            RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), focused: true, events, ..Default::default() },
+            |ui| {
+                let mut style = DockStyle::from_ui(ui);
+                style.min_pane = 0.0;
+                actions = DockArea::new(Id::new("collapsed-resize"))
+                    .show_with_limits(
+                        ui,
+                        &layout,
+                        &style,
+                        |p| p.to_string(),
+                        |_| Permissions::default(),
+                        |_| PanelLimits { min: vec2(220.0, 0.0), max: vec2(1000.0, 0.0) },
+                        |_, _| {},
+                    )
+                    .actions;
+            },
+        )
+        .textures_delta
+        .clear();
+        for action in actions {
+            layout.apply(action).unwrap();
+        }
+    };
+    for _ in 0..3 {
+        frame(vec![]);
+    }
+    ctx.memory_mut(|memory| memory.request_focus(id));
+    frame(vec![Event::Key { key: egui::Key::ArrowRight, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }]);
+    assert_eq!(layout.floating[0].rect, [80.0, 70.0, 308.0, 26.0]);
+}
+
+#[test]
 fn returning_to_a_singleton_or_floating_source_body_is_an_explicit_noop() {
     for panels in [vec![1u32], vec![1, 2, 3]] {
         for allow_splits in [false, true] {

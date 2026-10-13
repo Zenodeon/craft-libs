@@ -1207,7 +1207,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                         });
                     }
                     let pointer_resize = response.dragged() || response.drag_stopped();
-                    let limits = PanelLimits { min: limits.min.max(vec2(40.0, self.style.tab_height + 20.0)), ..limits };
+                    let limits = PanelLimits { min: limits.min.max(vec2(40.0, self.style.tab_height + 20.0)).min(limits.max), ..limits };
                     let next = if pointer_resize {
                         ui.ctx()
                             .data(|data| data.get_temp::<super::AnchoredResize>(anchor_id))
