@@ -241,3 +241,7 @@ pointer gestures. PhotoCraft uses an 8-point band and preserves both receiving h
 
 Host-resolved and default tab-drop feedback explicitly raise the foreground destination layer
 when painting, so fully opaque insertion lines stay above stationary header and moving UI layers.
+
+Pointer resizing releases divider/corner focus when its drag stops, so the focused accent
+highlight does not remain after release and pointer exit. Ordinary hover and drag feedback
+remain, and keyboard focus through traversal still supports arrow-key resizing.

@@ -1111,6 +1111,9 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                     if response.drag_started() {
                         response.request_focus();
                     }
+                    if response.drag_stopped() {
+                        response.surrender_focus();
+                    }
                     let mut delta = if response.dragged() { ui.input(|i| i.pointer.delta()) } else { Vec2::ZERO };
                     if response.has_focus() {
                         ui.memory_mut(|memory| {
