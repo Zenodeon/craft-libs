@@ -520,7 +520,15 @@ fn docked_header_drag_is_opt_in_and_preserves_selected_group_members() {
         for handle in ["move-group-border", "move-group-header"] {
             let ctx = Context::default();
             let area = Id::new("docked-header");
-            let layout = Layout { root: Some(tabs(&[1, 2], 1)), floating: vec![] };
+            let layout = Layout {
+                root: Some(Node::Split {
+                    axis: SplitAxis::Vertical,
+                    size: SplitSize::Ratio(0.5),
+                    first: Box::new(tabs(&[3], 0)),
+                    second: Box::new(tabs(&[1, 2], 1)),
+                }),
+                floating: vec![],
+            };
             let mut content = Content { enabled, whole: false, bodies: vec![] };
             let mut frame = |events| {
                 content.bodies.clear();
@@ -554,7 +562,7 @@ fn docked_header_drag_is_opt_in_and_preserves_selected_group_members() {
             frame(vec![Event::PointerMoved(start), pointer_button(start, true)]);
             frame(vec![Event::PointerMoved(start + vec2(70.0, 80.0))]);
             assert!(content.whole, "{handle}: start={start:?}, dragged={:?}", ctx.dragged_id());
-            assert_eq!(content.bodies, [2], "only the selected moving body renders, preserving selection");
+            assert_eq!(content.bodies, [3, 2], "the neighbor stays docked and only the selected moving body renders");
         }
     }
 }

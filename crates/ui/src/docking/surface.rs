@@ -612,8 +612,8 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 if self.geometry.as_ref().is_some_and(|state| state.active) {
                     return;
                 }
-                // The divider's inner-edge hit margin must win over child scrollbars, just
-                // as accordion dividers win over the adjacent panel's content.
+                // Opted-in group headers own their top border. Keep the vertical
+                // splitter inside its divider instead of stealing that drag band.
                 let response = ResizeHandle::new(
                     self.surface.with(("split", &*path)),
                     *axis,
@@ -621,6 +621,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                     &self.style.resize_label,
                     ResizeHandleStyle { hovered: self.style.accent, dragged: self.style.accent, focused: self.style.accent },
                 )
+                .hit_margin(if *axis == SplitAxis::Vertical && self.content.drag_docked_headers() { 0.0 } else { 3.0 })
                 .value(split.first_size(), lo..=hi)
                 .show(ui);
                 self.register_interaction(ui.ctx(), response.response.id);
