@@ -1373,7 +1373,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         };
         let Some(feedback) = self.content.resolve_drag(ctx, self.style, &request) else { return false };
         if !released {
-            let layer = egui::LayerId::new(egui::Order::Foreground, self.id.with("drop-preview"));
+            let layer = egui::LayerId::new(egui::Order::Tooltip, self.id.with("drop-preview"));
             ctx.move_to_top(layer);
             let painter = ctx.layer_painter(layer);
             if let Some(rect) = feedback.preview.filter(|rect| super::targets::usable(*rect)) {
@@ -1507,7 +1507,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             }
             return;
         }
-        let layer = egui::LayerId::new(egui::Order::Foreground, self.id.with("drop-preview"));
+        let layer = egui::LayerId::new(egui::Order::Tooltip, self.id.with("drop-preview"));
         ctx.move_to_top(layer);
         let painter = ctx.layer_painter(layer);
         if let Some(proposal) = proposal {
