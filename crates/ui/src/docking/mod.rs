@@ -6,6 +6,7 @@
 //! input and commits only a valid result; a rejected move cannot lose the source panel.
 
 mod geometry;
+mod between;
 mod model;
 mod surface;
 mod strips;
@@ -13,6 +14,8 @@ mod targets;
 
 pub use model::{Action, DockError, Floating, Layout, Location, MAX_DEPTH, MAX_PANELS, Node, Permissions, Placement, StackEntry, Zone};
 pub use geometry::geometry_transition_active;
+pub use between::{BetweenRequest, insert_between};
+pub use surface::{LayoutMeasurement, SplitBoundary, measure_layout_with_boundaries};
 pub use surface::{DockArea, DockContent, DockOutput, DockStyle, DropFeedback, DropRequest, PanelLimits, begin_drag, cancel_drag, is_dragging, measure_layout};
 pub use targets::{DropProposal, DropTarget, drop_zone, resolve_drop, tab_insertion_marker, zone_rect};
 

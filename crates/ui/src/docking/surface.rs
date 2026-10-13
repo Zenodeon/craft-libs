@@ -1322,7 +1322,9 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         };
         let Some(feedback) = self.content.resolve_drag(ctx, self.style, &request) else { return false };
         if !released {
-            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, self.id.with("drop-preview")));
+            let layer = egui::LayerId::new(egui::Order::Foreground, self.id.with("drop-preview"));
+            ctx.move_to_top(layer);
+            let painter = ctx.layer_painter(layer);
             if let Some(rect) = feedback.preview.filter(|rect| super::targets::usable(*rect)) {
                 painter.rect(rect, 0.0, self.style.accent.gamma_multiply(0.15), Stroke::new(2.0, self.style.accent), StrokeKind::Inside);
             }
@@ -1454,7 +1456,9 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             }
             return;
         }
-        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, self.id.with("drop-preview")));
+        let layer = egui::LayerId::new(egui::Order::Foreground, self.id.with("drop-preview"));
+        ctx.move_to_top(layer);
+        let painter = ctx.layer_painter(layer);
         if let Some(proposal) = proposal {
             let same_group = proposal.insertion.is_some()
                 && self.targets.iter().any(|target| target.rect == proposal.preview && target.tabs.iter().any(|(panel, _)| panel == &drag.panel));
@@ -1499,7 +1503,7 @@ fn split_bounds(available: f32, axis: SplitAxis, first: PanelLimits, second: Pan
     if constrained_lo <= constrained_hi { (constrained_lo, constrained_hi) } else { (lo, hi) }
 }
 
-fn node_limits<P>(
+pub(super) fn node_limits<P>(
     node: &Node<P>,
     style: &DockStyle,
     permissions: &impl Fn(&P) -> Permissions,
@@ -1560,13 +1564,39 @@ pub fn measure_layout<P: Clone + Eq + Hash>(
     permissions: impl Fn(&P) -> Permissions,
     limits: impl Fn(&P) -> PanelLimits,
 ) -> Result<Vec<(P, Rect)>, DockError> {
+    measure_layout_with_boundaries(layout, workspace, screen, style, permissions, limits).map(|measured| measured.panels)
+}
+
+/// Authoritative group bounds and real internal dividers, sharing the renderer's constraints.
+#[derive(Clone, Debug)]
+pub struct LayoutMeasurement<P> {
+    pub panels: Vec<(P, Rect)>,
+    pub boundaries: Vec<SplitBoundary<P>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SplitBoundary<P> {
+    pub axis: SplitAxis,
+    pub rect: Rect,
+    pub divider: Rect,
+    pub first_rect: Rect,
+    pub second_rect: Rect,
+    pub first: Vec<P>,
+    pub second: Vec<P>,
+}
+
+pub fn measure_layout_with_boundaries<P: Clone + Eq + Hash>(
+    layout: &Layout<P>, workspace: Rect, screen: Rect, style: &DockStyle,
+    permissions: impl Fn(&P) -> Permissions, limits: impl Fn(&P) -> PanelLimits,
+) -> Result<LayoutMeasurement<P>, DockError> {
     layout.validate()?;
     if !style.valid() || !super::targets::usable(workspace) || !super::targets::usable(screen) || layout.panels().iter().any(|p| !limits(p).valid()) {
         return Err(DockError::InvalidGeometry);
     }
     let mut output = Vec::new();
+    let mut boundaries = Vec::new();
     if let Some(root) = &layout.root {
-        measure_node(root, workspace, style, &permissions, &limits, &mut output);
+        measure_node(root, workspace, style, &permissions, &limits, &mut output, &mut boundaries);
     }
     for group in &layout.floating {
         let policy = node_limits(&Node::Tabs { panels: group.panels.clone(), active: group.active }, style, &permissions, &limits);
@@ -1574,7 +1604,7 @@ pub fn measure_layout<P: Clone + Eq + Hash>(
         let rect = clamp_float(Rect::from_min_size(pos2(x, y), vec2(w, h).max(policy.min).min(policy.max)), screen);
         output.extend(group.panels.iter().cloned().map(|p| (p, rect)));
     }
-    Ok(output)
+    Ok(LayoutMeasurement { panels: output, boundaries })
 }
 
 fn measure_node<P: Clone>(
@@ -1584,6 +1614,7 @@ fn measure_node<P: Clone>(
     permissions: &impl Fn(&P) -> Permissions,
     limits: &impl Fn(&P) -> PanelLimits,
     output: &mut Vec<(P, Rect)>,
+    boundaries: &mut Vec<SplitBoundary<P>>,
 ) {
     match node {
         Node::Split { axis, size, first, second } => {
@@ -1597,8 +1628,15 @@ fn measure_node<P: Clone>(
             ) else {
                 return;
             };
-            measure_node(first, split.first, style, permissions, limits, output);
-            measure_node(second, split.second, style, permissions, limits, output);
+            let a = output.len();
+            measure_node(first, split.first, style, permissions, limits, output, boundaries);
+            let b = output.len();
+            measure_node(second, split.second, style, permissions, limits, output, boundaries);
+            boundaries.push(SplitBoundary {
+                axis: *axis, rect, divider: split.divider, first_rect: split.first, second_rect: split.second,
+                first: output.get(a..b).unwrap_or_default().iter().map(|(panel, _)| panel.clone()).collect(),
+                second: output.get(b..).unwrap_or_default().iter().map(|(panel, _)| panel.clone()).collect(),
+            });
         }
         Node::Tabs { panels, .. } => output.extend(panels.iter().cloned().map(|p| (p, rect))),
         Node::Stack { entries } => {

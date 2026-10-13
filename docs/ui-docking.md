@@ -224,3 +224,20 @@ so hosts can retain their temporary presentation shell until the complete transi
 Floating areas paint their complete background beneath the tab strip and disable automatic Area
 appearance fading. Transparent theme tab-strip colors therefore reveal the panel background,
 not the canvas. The host's intentional moving-UI opacity continues to apply during dragging.
+
+## Shared-divider insertion
+
+`measure_layout_with_boundaries` returns group rectangles and actual split dividers from the
+same constrained traversal used by `measure_layout`. Each SplitBoundary includes orientation,
+parent/child bounds and stable panel members on each side; floating windows are not seams.
+
+`insert_between` accepts a BetweenRequest with moving members, selected member and ordered
+before/after neighbor identities. It removes sources in a staged clone, finds the surviving
+boundary and inserts a new group between its children. New space starts at one third after
+the two dividers; neighbors retain their measured proportion with min/max constraints. Invalid
+identities, permissions, geometry, insufficient space and final depth limits leave the original
+layout untouched. Hosts choose the hit band and apply the same operation for commands and
+pointer gestures. PhotoCraft uses an 8-point band and preserves both receiving headers.
+
+Host-resolved and default tab-drop feedback explicitly raise the foreground destination layer
+when painting, so fully opaque insertion lines stay above stationary header and moving UI layers.
