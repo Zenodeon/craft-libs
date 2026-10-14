@@ -148,7 +148,9 @@ grips. It excludes panel content and custom header/menu widgets and rejects inva
 layouts. Hosts can permit global commands from chrome while reserving Enter, Space,
 Tab, Escape and arrow keys for activation, traversal, cancellation and resizing.
 Content widgets retain their usual keyboard ownership. The renderer owns the IDs;
-hosts do not need to reconstruct them.
+hosts do not need to reconstruct them. Configure the querying `DockArea` with the same
+`surface(...)` value used for rendering; split-divider focus belongs to that surface,
+while tab, accordion and floating-control identities retain their shared session IDs.
 
 ## Host-resolved drops and measurement
 

@@ -1123,6 +1123,54 @@ fn chrome_focus_classifies_rendered_accordion_and_split_and_floating_resizers() 
 }
 
 #[test]
+fn chrome_focus_uses_surface_ids_for_split_dividers() {
+    let session = Id::new("split-focus-session");
+    for surface in [session, Id::new("split-focus-surface")] {
+        for axis in [SplitAxis::Horizontal, SplitAxis::Vertical] {
+            let inner_axis = if axis == SplitAxis::Horizontal { SplitAxis::Vertical } else { SplitAxis::Horizontal };
+            let child = |first, second| Node::Split {
+                axis: inner_axis,
+                size: SplitSize::Ratio(0.5),
+                first: Box::new(tabs(&[first], 0)),
+                second: Box::new(tabs(&[second], 0)),
+            };
+            let layout = Layout {
+                root: Some(Node::Split { axis, size: SplitSize::Ratio(0.5), first: Box::new(child(1, 2)), second: Box::new(child(3, 4)) }),
+                floating: Vec::new(),
+            };
+            for path in [vec![], vec![false], vec![true]] {
+                let ctx = Context::default();
+                let divider = surface.with(("split", &path));
+                for _ in 0..2 {
+                    ctx.run_ui(
+                        RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), focused: true, ..Default::default() },
+                        |ui| {
+                            DockArea::new(session).surface(surface).show(
+                                ui,
+                                &layout,
+                                &DockStyle::from_ui(ui),
+                                |panel| panel.to_string(),
+                                |_| Permissions::default(),
+                                |ui, _| {
+                                    ui.label("Body");
+                                },
+                            );
+                            ui.memory_mut(|memory| memory.request_focus(divider));
+                        },
+                    )
+                    .textures_delta
+                    .clear();
+                }
+                assert!(ctx.read_response(divider).is_some(), "the divider must actually render");
+                assert_eq!(ctx.memory(|memory| memory.focused()), Some(divider));
+                assert!(DockArea::new(session).surface(surface).chrome_has_focus(&ctx, &layout), "surface={surface:?}, axis={axis:?}, path={path:?}");
+                assert!(!DockArea::new(session).surface(Id::new("other-split-focus-surface")).chrome_has_focus(&ctx, &layout));
+            }
+        }
+    }
+}
+
+#[test]
 fn workspace_cancel_stops_owned_resize_controls_until_new_press() {
     let area = Id::new("test-area");
     let fixtures = [

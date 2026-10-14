@@ -316,6 +316,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<P> {
     }
 
     /// Whether keyboard focus belongs to a rendered docking control in this layout.
+    /// Use the same [`Self::surface`] configuration as rendering when querying focus.
     /// Panel bodies and application-provided header/menu widgets are excluded. Hosts may
     /// route nonconflicting global shortcuts through chrome while retaining widget ownership
     /// of activation, traversal, resize and cancellation keys. Invalid layouts return false.
@@ -354,7 +355,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<P> {
                     }
                 }
                 Node::Split { first, second, .. } => {
-                    if matches(self.id.with(("split", &path))) {
+                    if matches(self.surface.with(("split", &path))) {
                         return true;
                     }
                     let mut second_path = path.clone();
